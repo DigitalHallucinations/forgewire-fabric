@@ -1,0 +1,13 @@
+# fw-claim-router — capability-aware task selection
+
+[package]
+name = "fw-claim-router"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+
+[lints]
+workspace = true

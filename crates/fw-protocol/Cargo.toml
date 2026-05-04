@@ -1,0 +1,17 @@
+# fw-protocol — ForgeWire wire protocol primitives
+
+[package]
+name = "fw-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ed25519-dalek.workspace = true
+hex.workspace = true
+
+[lints]
+workspace = true

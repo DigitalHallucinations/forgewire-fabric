@@ -1,0 +1,48 @@
+# forgewire/Cargo.toml
+#
+# Rust acceleration core for the ForgeWire control plane.
+# Workspace of focused crates plus a single PyO3 binding crate that exposes
+# the Python-importable extension.
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/fw-protocol",
+    "crates/fw-claim-router",
+    "crates/fw-streams",
+    "crates/fw-py",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/DigitalHallucinations/forgewire"
+authors = ["Jeremy Shows <jeremyshws@gmail.com>"]
+
+[workspace.dependencies]
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+ed25519-dalek = { version = "2.1", default-features = false, features = ["std", "fast"] }
+hex = "0.4"
+
+# Internal crates
+fw-protocol = { path = "crates/fw-protocol" }
+fw-claim-router = { path = "crates/fw-claim-router" }
+fw-streams = { path = "crates/fw-streams" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+
+[workspace.lints.clippy]
+cast_possible_truncation = "warn"
+cast_sign_loss = "warn"
+float_cmp = "warn"
+needless_pass_by_value = "warn"
+cloned_instead_of_copied = "warn"
+manual_let_else = "warn"
+semicolon_if_nothing_returned = "warn"
+uninlined_format_args = "warn"

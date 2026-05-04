@@ -1,0 +1,24 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "forgewire-runtime"
+description = "Rust acceleration core for the ForgeWire control plane (Stage C of PhrenForge todo 113)."
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Jeremy Shows", email = "jeremyshws@gmail.com" }]
+readme = "README.md"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Rust",
+]
+dynamic = ["version"]
+
+[tool.maturin]
+manifest-path = "crates/fw-py/Cargo.toml"
+module-name = "forgewire_runtime"
+features = ["pyo3/extension-module"]
+strip = true
