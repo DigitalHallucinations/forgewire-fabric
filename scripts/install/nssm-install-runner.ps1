@@ -53,8 +53,12 @@ foreach ($principal in @("NT AUTHORITY\SYSTEM", "BUILTIN\Administrators")) {
 }
 Set-Acl -Path $TokenFile -AclObject $acl
 
-$existing = & nssm.exe status $ServiceName 2>$null
-if ($LASTEXITCODE -eq 0) {
+$prevPref = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+& nssm.exe status $ServiceName *>$null
+$exists = ($LASTEXITCODE -eq 0)
+$ErrorActionPreference = $prevPref
+if ($exists) {
     Write-Host "Service '$ServiceName' exists; updating in place."
     & nssm.exe stop $ServiceName confirm | Out-Null
 } else {
