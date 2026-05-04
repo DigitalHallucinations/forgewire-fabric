@@ -21,8 +21,8 @@ if not getattr(forgewire_runtime, "HAS_RUST", False) or not hasattr(
 ):
     pytest.skip("forgewire_runtime.pick_task not available", allow_module_level=True)
 
-from scripts.remote.hub import _router as router_mod
-from scripts.remote.hub._router import _py_pick_task
+from forgewire.hub import _router as router_mod
+from forgewire.hub._router import _py_pick_task
 
 
 def _rust_pick(tasks: list[dict[str, Any]], runner: dict[str, Any]) -> tuple[int | None, int]:

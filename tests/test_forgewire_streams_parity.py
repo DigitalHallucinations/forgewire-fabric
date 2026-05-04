@@ -16,8 +16,8 @@ from pathlib import Path
 
 import pytest
 
-from scripts.remote.hub import _streams as streams_module
-from scripts.remote.hub._streams import _PyStreamCounter
+from forgewire.hub import _streams as streams_module
+from forgewire.hub._streams import _PyStreamCounter
 
 try:
     import forgewire_runtime as _rust  # type: ignore[import-not-found]
@@ -124,7 +124,7 @@ def test_facade_force_python(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_blackboard_append_stream_uses_counter(tmp_path: Path) -> None:
     """End-to-end: Blackboard.append_stream emits dense, monotonic seqs."""
-    from scripts.remote.hub.server import Blackboard
+    from forgewire.hub.server import Blackboard
 
     db_path = tmp_path / "bb.sqlite3"
     bb = Blackboard(db_path)
@@ -155,7 +155,7 @@ def test_blackboard_append_stream_uses_counter(tmp_path: Path) -> None:
 
 def test_blackboard_reprimes_after_restart(tmp_path: Path) -> None:
     """A fresh Blackboard re-primes from MAX(seq) — kill -9 is safe."""
-    from scripts.remote.hub.server import Blackboard
+    from forgewire.hub.server import Blackboard
 
     db_path = tmp_path / "bb.sqlite3"
     bb = Blackboard(db_path)
@@ -190,7 +190,7 @@ def test_blackboard_append_stream_bulk_assigns_dense_seqs(tmp_path: Path) -> Non
     payoff (one fsync per batch instead of N) isn't asserted here — that
     lives in the bench — but the wire protocol is validated end-to-end.
     """
-    from scripts.remote.hub.server import Blackboard
+    from forgewire.hub.server import Blackboard
 
     db_path = tmp_path / "bb.sqlite3"
     bb = Blackboard(db_path)
@@ -232,7 +232,7 @@ def test_blackboard_append_stream_bulk_assigns_dense_seqs(tmp_path: Path) -> Non
 
 
 def test_blackboard_append_stream_bulk_rejects_bad_channel(tmp_path: Path) -> None:
-    from scripts.remote.hub.server import Blackboard
+    from forgewire.hub.server import Blackboard
 
     db_path = tmp_path / "bb.sqlite3"
     bb = Blackboard(db_path)
@@ -265,7 +265,7 @@ def test_blackboard_append_stream_bulk_rejects_bad_channel(tmp_path: Path) -> No
 
 
 def test_blackboard_append_stream_bulk_empty_is_noop(tmp_path: Path) -> None:
-    from scripts.remote.hub.server import Blackboard
+    from forgewire.hub.server import Blackboard
 
     db_path = tmp_path / "bb.sqlite3"
     bb = Blackboard(db_path)

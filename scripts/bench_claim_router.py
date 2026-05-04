@@ -13,7 +13,7 @@ import random
 import time
 from statistics import median
 
-from scripts.remote.hub._router import _py_pick_task
+from forgewire.hub._router import _py_pick_task
 
 try:
     import forgewire_runtime as _rust

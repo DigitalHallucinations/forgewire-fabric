@@ -275,23 +275,30 @@ class BlackboardClient:
 
 
 def load_client_from_env() -> BlackboardClient:
-    """Construct a client from ``BLACKBOARD_URL`` and ``BLACKBOARD_TOKEN``.
+    """Construct a client from environment variables.
 
-    ``BLACKBOARD_TOKEN_FILE`` is honored as a fallback.
+    Reads (in priority order):
 
-    If ``BLACKBOARD_URL`` is unset and ``BLACKBOARD_DISCOVER=1`` is set,
-    attempt an mDNS browse for ``_phrenforge-hub._tcp.local.`` and pick the
-    first responder. Falls back to ``http://127.0.0.1:8765`` otherwise.
+    * ``FORGEWIRE_HUB_URL`` / ``FORGEWIRE_HUB_TOKEN`` / ``FORGEWIRE_HUB_TOKEN_FILE``
+      / ``FORGEWIRE_HUB_DISCOVER`` -- canonical names.
+    * ``BLACKBOARD_URL`` / ``BLACKBOARD_TOKEN`` / ``BLACKBOARD_TOKEN_FILE``
+      / ``BLACKBOARD_DISCOVER`` -- legacy aliases (PhrenForge integration).
+
+    If no URL is set and ``*_DISCOVER=1`` is set, attempts an mDNS browse for
+    ``_forgewire-hub._tcp.local.`` and picks the first responder. Falls back
+    to ``http://127.0.0.1:8765`` otherwise.
     """
-    base = os.environ.get("BLACKBOARD_URL", "").strip()
-    if not base and os.environ.get("BLACKBOARD_DISCOVER", "").lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }:
+    base = (
+        os.environ.get("FORGEWIRE_HUB_URL", "").strip()
+        or os.environ.get("BLACKBOARD_URL", "").strip()
+    )
+    discover = (
+        os.environ.get("FORGEWIRE_HUB_DISCOVER", "")
+        or os.environ.get("BLACKBOARD_DISCOVER", "")
+    ).lower() in {"1", "true", "yes", "on"}
+    if not base and discover:
         try:
-            from scripts.remote.hub.discovery import discover_hubs
+            from forgewire.hub.discovery import discover_hubs
 
             hits = discover_hubs(timeout=3.0)
         except Exception:
@@ -301,13 +308,19 @@ def load_client_from_env() -> BlackboardClient:
             base = f"http://{top['host']}:{top['port']}"
     if not base:
         base = "http://127.0.0.1:8765"
-    token = os.environ.get("BLACKBOARD_TOKEN", "").strip()
+    token = (
+        os.environ.get("FORGEWIRE_HUB_TOKEN", "").strip()
+        or os.environ.get("BLACKBOARD_TOKEN", "").strip()
+    )
     if not token:
-        token_file = os.environ.get("BLACKBOARD_TOKEN_FILE")
+        token_file = os.environ.get("FORGEWIRE_HUB_TOKEN_FILE") or os.environ.get(
+            "BLACKBOARD_TOKEN_FILE"
+        )
         if token_file:
             token = Path(token_file).read_text(encoding="utf-8").strip()
     if not token:
         raise SystemExit(
-            "BLACKBOARD_TOKEN (or BLACKBOARD_TOKEN_FILE) must be set for MCP clients"
+            "FORGEWIRE_HUB_TOKEN (or FORGEWIRE_HUB_TOKEN_FILE) must be set"
         )
     return BlackboardClient(base, token)
+

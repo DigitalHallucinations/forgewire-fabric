@@ -21,7 +21,7 @@ import subprocess
 import time
 from typing import Any
 
-from scripts.remote.runner.identity import RunnerIdentity
+from forgewire.runner.identity import RunnerIdentity
 
 
 # ---------------------------------------------------------------------- info

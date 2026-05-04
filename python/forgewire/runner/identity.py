@@ -35,7 +35,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 
 
-DEFAULT_IDENTITY_PATH = Path.home() / ".phrenforge" / "runner_identity.json"
+DEFAULT_IDENTITY_PATH = Path.home() / ".forgewire" / "runner_identity.json"
+_LEGACY_IDENTITY_PATH = Path.home() / ".phrenforge" / "runner_identity.json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +61,12 @@ def _now_iso() -> str:
 def load_or_create(path: Path | None = None) -> RunnerIdentity:
     """Return the persisted identity, creating it on first use."""
     target = (path or DEFAULT_IDENTITY_PATH).expanduser()
+    if not target.exists() and path is None and _LEGACY_IDENTITY_PATH.exists():
+        # Migrate from legacy ~/.phrenforge/runner_identity.json on first read.
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            _LEGACY_IDENTITY_PATH.read_text(encoding="utf-8"), encoding="utf-8"
+        )
     if target.exists():
         data = json.loads(target.read_text(encoding="utf-8"))
         return RunnerIdentity(

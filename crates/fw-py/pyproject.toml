@@ -1,0 +1,28 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "forgewire-runtime"
+description = "Rust acceleration core for the ForgeWire control plane (claim router, stream counters, ed25519 verification)."
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Jeremy Shows", email = "jeremyshws@gmail.com" }]
+readme = "../../README.md"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Rust",
+]
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/DigitalHallucinations/forgewire"
+Repository = "https://github.com/DigitalHallucinations/forgewire"
+
+[tool.maturin]
+manifest-path = "Cargo.toml"
+module-name = "forgewire_runtime"
+features = ["pyo3/extension-module"]
+strip = true

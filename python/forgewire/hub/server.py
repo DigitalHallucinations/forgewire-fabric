@@ -14,7 +14,7 @@ Storage: SQLite WAL at ``BLACKBOARD_DB_PATH`` (default
 
 Run::
 
-    python -m scripts.remote.hub.server --host 0.0.0.0 --port 8765
+    python -m forgewire.hub.server --host 0.0.0.0 --port 8765
 
 Hardening notes:
 * Default bind is 127.0.0.1 (safe for colocation-only setups). The hub
@@ -45,12 +45,12 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
-from scripts.remote.hub._crypto import HAS_RUST as _HUB_CRYPTO_HAS_RUST
-from scripts.remote.hub._crypto import verify_signature
-from scripts.remote.hub._router import HAS_RUST as _HUB_ROUTER_HAS_RUST
-from scripts.remote.hub._router import pick_task as _router_pick_task
-from scripts.remote.hub._streams import HAS_RUST as _HUB_STREAMS_HAS_RUST
-from scripts.remote.hub._streams import make_counter as _make_stream_counter
+from forgewire.hub._crypto import HAS_RUST as _HUB_CRYPTO_HAS_RUST
+from forgewire.hub._crypto import verify_signature
+from forgewire.hub._router import HAS_RUST as _HUB_ROUTER_HAS_RUST
+from forgewire.hub._router import pick_task as _router_pick_task
+from forgewire.hub._streams import HAS_RUST as _HUB_STREAMS_HAS_RUST
+from forgewire.hub._streams import make_counter as _make_stream_counter
 
 LOGGER = logging.getLogger("phrenforge.remote.blackboard")
 
@@ -1643,32 +1643,44 @@ def _load_token(args: argparse.Namespace) -> str:
     if args.token_file:
         token = Path(args.token_file).read_text(encoding="utf-8").strip()
     else:
-        token = os.environ.get("BLACKBOARD_TOKEN", "").strip()
+        token = (
+            os.environ.get("FORGEWIRE_HUB_TOKEN", "").strip()
+            or os.environ.get("BLACKBOARD_TOKEN", "").strip()
+        )
     if not token:
         raise SystemExit(
-            "BLACKBOARD_TOKEN env var or --token-file is required (no anon access)"
+            "FORGEWIRE_HUB_TOKEN env var or --token-file is required (no anon access)"
         )
     if len(token) < 16:
-        raise SystemExit("blackboard token must be >= 16 characters")
+        raise SystemExit("hub token must be >= 16 characters")
     return token
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        prog="phrenforge-blackboard",
-        description="PhrenForge remote-subagent blackboard service",
+        prog="forgewire-hub",
+        description="ForgeWire hub server (signed dispatch / claim / streams)",
     )
-    parser.add_argument("--host", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument("--host", default=os.environ.get("FORGEWIRE_HUB_HOST", "127.0.0.1"))
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=int(os.environ.get("FORGEWIRE_HUB_PORT", str(DEFAULT_PORT))),
+    )
     parser.add_argument(
         "--db-path",
-        default=str(os.environ.get("BLACKBOARD_DB_PATH", DEFAULT_DB)),
+        default=str(
+            os.environ.get("FORGEWIRE_HUB_DB_PATH")
+            or os.environ.get("BLACKBOARD_DB_PATH")
+            or DEFAULT_DB
+        ),
     )
     parser.add_argument("--token-file", default=None)
     parser.add_argument(
         "--min-runner-version",
         default=os.environ.get(
-            "BLACKBOARD_MIN_RUNNER_VERSION", DEFAULT_MIN_RUNNER_VERSION
+            "FORGEWIRE_HUB_MIN_RUNNER_VERSION",
+            os.environ.get("BLACKBOARD_MIN_RUNNER_VERSION", DEFAULT_MIN_RUNNER_VERSION),
         ),
         help="Reject /runners/register from runners reporting a lower version.",
     )
@@ -1676,11 +1688,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--mdns",
         action="store_true",
-        default=os.environ.get("BLACKBOARD_MDNS", "").lower()
+        default=(
+            os.environ.get("FORGEWIRE_HUB_MDNS", "")
+            or os.environ.get("BLACKBOARD_MDNS", "")
+        ).lower()
         in {"1", "true", "yes", "on"},
-        help="Advertise the hub on the local LAN via mDNS (_phrenforge-hub._tcp).",
+        help="Advertise the hub on the local LAN via mDNS (_forgewire-hub._tcp).",
     )
     return parser.parse_args(argv)
+
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -1701,7 +1717,7 @@ def main(argv: list[str] | None = None) -> None:
     app = create_app(config)
     advertisement = None
     if args.mdns:
-        from scripts.remote.hub.discovery import advertise_hub
+        from forgewire.hub.discovery import advertise_hub
 
         advertisement = advertise_hub(
             port=config.port,

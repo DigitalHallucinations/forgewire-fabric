@@ -10,20 +10,46 @@ This repository is **extracted from [PhrenForge](https://github.com/DigitalHallu
 
 ## Status
 
-🚧 **Phase 0 → Phase 2 in progress.** This is the initial extraction snapshot. See [todo 114-forgewire-fabric](https://github.com/DigitalHallucinations/PhrenForge/tree/main/todos/114-forgewire-fabric) for the full roadmap (Phase 0 shipped in PhrenForge; Phase 2 is the extraction work happening here).
+✅ **M2.1 shipped — pip-installable.** End-to-end smoke verified: hub + runner + dispatch from `pip install forgewire`. See [`docs/QUICKSTART.md`](docs/QUICKSTART.md) for the 5-minute path. Roadmap in [todo 114-forgewire-fabric](https://github.com/DigitalHallucinations/PhrenForge/tree/main/todos/114-forgewire-fabric).
 
 | Component | State |
 |-----------|-------|
 | `crates/fw-protocol` | ✅ Stable. Protocol-v2 envelopes (ed25519). |
 | `crates/fw-claim-router` | ✅ Stable. Capability-tag matcher + scope filter. |
 | `crates/fw-streams` | ✅ Stable. In-memory monotonic seq counter. |
-| `crates/fw-py` | ✅ Stable. PyO3 bindings for the three crates. |
-| `python/forgewire/hub` | 🚧 Imports still reference original PhrenForge namespaces in places; rename to top-level `forgewire.*` is tracked as M2.1. |
-| `python/forgewire/runner` | 🚧 Same as above. |
+| `crates/fw-py` | ✅ Stable. PyO3 bindings — distributed as `forgewire-runtime`. |
+| `python/forgewire/hub` | ✅ Pure-Python hub server, `forgewire hub start`. |
+| `python/forgewire/runner` | ✅ Standalone claim-loop agent, `forgewire runner start`. |
+| `forgewire` CLI (Click) | ✅ `hub`, `runner`, `dispatch`, `tasks`, `runners`, `keys`, `token`. |
 | `tests/` | ✅ End-to-end + parity tests. |
-| Standalone PyPI package | 📋 Planned (M2.1). |
 | VS Code extension | 📋 Planned (M2.2). |
 | NSSM/systemd/launchd installers | 📋 Planned (M2.3). |
+
+---
+
+## Quickstart
+
+```bash
+pip install forgewire
+
+# Hub host
+forgewire token gen > hub.token
+export FORGEWIRE_HUB_TOKEN=$(cat hub.token)
+forgewire hub start --host 0.0.0.0 --port 8765
+
+# Each runner
+export FORGEWIRE_HUB_URL=http://<hub>:8765 FORGEWIRE_HUB_TOKEN=...
+forgewire runner start --workspace-root /path/to/repo \
+    --scope-prefixes "src/,tests/" --tags "linux,python:3.11"
+
+# Dispatch from any machine with the token
+forgewire dispatch "pytest -x" --scope "tests/**" \
+    --branch agent/laptop/smoke --base-commit $(git rev-parse origin/main)
+forgewire tasks list
+forgewire tasks stream <id>
+```
+
+Full guide: [`docs/QUICKSTART.md`](docs/QUICKSTART.md).
 
 ---
 
@@ -50,24 +76,24 @@ forgewire/
 
 ## Build & test
 
-### Rust workspace
+### Python control plane (recommended)
 
-```powershell
-cargo test --workspace
-```
-
-### Python (via Rust extension)
-
-```powershell
-# from repo root
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install maturin pytest pytest-asyncio fastapi httpx uvicorn pydantic pynacl
-maturin develop --release -m crates/fw-py/Cargo.toml
+```bash
+pip install -e .[test]
 pytest tests/ -q
 ```
 
-> **Note:** During this extraction phase some Python module imports (e.g. `scripts.remote.hub.*`) still mirror the original PhrenForge layout. They will be normalized to `forgewire.*` in M2.1. Until then, the recommended consumer surface is the Rust crates and the FastAPI hub server entry point.
+### Rust runtime extension
+
+```bash
+cargo test --workspace
+# Or build the Python binding:
+maturin develop --release -m crates/fw-py/pyproject.toml
+```
+
+The Rust extension (`forgewire-runtime`) is *optional*. The pure-Python hub
+and runner work without it; install it for the accelerated claim-router and
+stream counters when running large fleets.
 
 ---
 

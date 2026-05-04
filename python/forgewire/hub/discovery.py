@@ -4,8 +4,8 @@ The ``zeroconf`` package is an optional dependency. When it is unavailable we
 degrade gracefully -- the hub simply skips advertisement and the dispatcher
 falls back to ``BLACKBOARD_URL`` (or the configured default).
 
-Service type: ``_phrenforge-hub._tcp.local.`` -- distinct from the legacy
-``_phrenforge-runner._tcp.local`` brainstormed in todo 23 because the hub is
+Service type: ``_forgewire-hub._tcp.local.`` -- distinct from the legacy
+``_forgewire-runner._tcp.local`` brainstormed in todo 23 because the hub is
 the always-on control plane; runners reach *it*, not the other way around.
 
 TXT record fields:
@@ -25,7 +25,7 @@ from typing import Any
 
 LOGGER = logging.getLogger("phrenforge.remote.discovery")
 
-SERVICE_TYPE = "_phrenforge-hub._tcp.local."
+SERVICE_TYPE = "_forgewire-hub._tcp.local."
 
 
 @dataclass(slots=True)
@@ -109,7 +109,7 @@ def advertise_hub(
 
 
 def discover_hubs(timeout: float = 3.0) -> list[dict[str, Any]]:
-    """Browse the local LAN for ``_phrenforge-hub._tcp`` services.
+    """Browse the local LAN for ``_forgewire-hub._tcp`` services.
 
     Returns a list of ``{host, port, protocol_version, addresses, name}`` dicts.
     Empty list if zeroconf is missing or no hubs answer in ``timeout`` seconds.

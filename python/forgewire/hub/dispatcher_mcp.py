@@ -20,7 +20,7 @@ Run via stdio from VS Code's ``.vscode/mcp.json``::
       "servers": {
         "phrenforge-dispatcher": {
           "command": "python",
-          "args": ["-m", "scripts.remote.hub.dispatcher_mcp"],
+          "args": ["-m", "forgewire.hub.dispatcher_mcp"],
           "env": {
             "BLACKBOARD_URL": "http://10.220.190.95:8765",
             "BLACKBOARD_TOKEN_FILE": "${userHome}/.phrenforge/blackboard.token"
@@ -39,12 +39,12 @@ from typing import Any
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
-from scripts.remote.hub.client import (
+from forgewire.hub.client import (
     BlackboardClient,
     BlackboardError,
     load_client_from_env,
 )
-from scripts.remote.hub.mcp_common import ToolRegistry
+from forgewire.hub.mcp_common import ToolRegistry
 
 LOGGER = logging.getLogger("phrenforge.remote.dispatcher_mcp")
 
@@ -323,7 +323,7 @@ def _register_tools(registry: ToolRegistry, client: BlackboardClient) -> None:
     )
 
     async def discover_hub(args: dict[str, Any]) -> dict[str, Any]:
-        from scripts.remote.hub.discovery import discover_hubs
+        from forgewire.hub.discovery import discover_hubs
 
         timeout = float(args.get("timeout_seconds", 3.0))
         hits = discover_hubs(timeout=timeout)

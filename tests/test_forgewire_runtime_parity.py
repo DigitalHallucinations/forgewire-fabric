@@ -14,7 +14,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from scripts.remote.hub import _crypto
+from forgewire.hub import _crypto
 
 try:
     import forgewire_runtime as _rust  # type: ignore[import-not-found]

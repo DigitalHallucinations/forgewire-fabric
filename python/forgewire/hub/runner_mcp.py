@@ -47,14 +47,14 @@ from typing import Any
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
-from scripts.remote.hub.client import (
+from forgewire.hub.client import (
     BlackboardClient,
     BlackboardError,
     load_client_from_env,
 )
-from scripts.remote.hub.mcp_common import ToolRegistry
-from scripts.remote.runner.identity import RunnerIdentity, load_or_create
-from scripts.remote.runner.runner_capabilities import (
+from forgewire.hub.mcp_common import ToolRegistry
+from forgewire.runner.identity import RunnerIdentity, load_or_create
+from forgewire.runner.runner_capabilities import (
     describe_host,
     detect_tools,
     fresh_nonce,

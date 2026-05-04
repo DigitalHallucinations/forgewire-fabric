@@ -2,12 +2,12 @@
 
 Two CLI entry points:
 
-* ``python -m scripts.remote.runner.worktree prepare --task-file <json>``
+* ``python -m forgewire.runner.worktree prepare --task-file <json>``
     Creates a git worktree at the configured location, checks out a fresh
     branch from ``base_commit``, writes ``.git/phrenforge_task.json`` inside the
     worktree (used by the pre-commit hook), and prints the worktree path.
 
-* ``python -m scripts.remote.runner.worktree check-scope <files>...``
+* ``python -m forgewire.runner.worktree check-scope <files>...``
     Reads ``.git/phrenforge_task.json`` from the current repo and rejects any
     of the given paths that don't match a scope glob. Used as the pre-commit
     hook: ``git diff --cached --name-only | xargs python -m ... check-scope``.
@@ -201,7 +201,7 @@ def _install_pre_commit_hook(*, worktree: Path) -> None:
         'if [ -z "$staged" ]; then\n'
         "  exit 0\n"
         "fi\n"
-        'echo "$staged" | "$python_exe" -m scripts.remote.runner.worktree '
+        'echo "$staged" | "$python_exe" -m forgewire.runner.worktree '
         'check-scope --repo "$repo_root" --stdin\n'
     )
     hook_path.write_text(contents, encoding="utf-8")
