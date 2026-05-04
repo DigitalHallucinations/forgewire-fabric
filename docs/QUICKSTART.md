@@ -206,3 +206,43 @@ settings reference.
 
 Legacy `BLACKBOARD_*` aliases are still accepted for backwards compatibility
 with PhrenForge integrations.
+
+## Signed dispatch (M2.4)
+
+By default, the hub accepts dispatches authenticated only by the bearer token.
+You can additionally require **per-dispatcher ed25519 envelope signatures** so
+that even a leaked bearer token cannot impersonate an arbitrary developer.
+
+### One-time dispatcher setup
+
+On each developer workstation:
+
+```bash
+forgewire keys init-dispatcher --label "$(hostname)"
+```
+
+This writes `~/.forgewire/dispatcher_identity.json` (mode 0o600 on POSIX). The
+first `forgewire dispatch` call after this auto-registers the public key with
+the hub; subsequent dispatches sign the immutable fields of the envelope
+(`op`, `dispatcher_id`, `title`, `prompt`, `scope_globs`, `base_commit`,
+`branch`, `timestamp`, `nonce`) and include the signature.
+
+### Enforcing signed dispatch on the hub
+
+To reject unsigned dispatches entirely, start the hub with:
+
+```bash
+forgewire hub start --require-signed-dispatch
+# or
+FORGEWIRE_HUB_REQUIRE_SIGNED_DISPATCH=1 forgewire hub start
+```
+
+When this flag is on, `POST /tasks` returns `426 Upgrade Required` and
+clients must use `POST /tasks/v2`.
+
+### Inspecting registered dispatchers
+
+```bash
+forgewire dispatchers list
+```
+

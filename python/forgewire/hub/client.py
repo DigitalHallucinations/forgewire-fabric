@@ -188,6 +188,25 @@ class BlackboardClient:
         assert result is not None
         return result
 
+    # ---- M2.4: dispatcher signing -----------------------------------------
+
+    async def register_dispatcher(self, payload: dict[str, Any]) -> dict[str, Any]:
+        result = await self._request("POST", "/dispatchers/register", json=payload)
+        assert result is not None
+        return result
+
+    async def list_dispatchers(self) -> dict[str, Any]:
+        result = await self._request("GET", "/dispatchers")
+        assert result is not None
+        return result
+
+    async def dispatch_task_signed(
+        self, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        result = await self._request("POST", "/tasks/v2", json=payload)
+        assert result is not None
+        return result
+
     async def append_stream(
         self, task_id: int, payload: dict[str, Any]
     ) -> dict[str, Any]:

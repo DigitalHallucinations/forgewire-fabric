@@ -113,6 +113,7 @@ class BlackboardConfig:
     host: str
     port: int
     min_runner_version: str = DEFAULT_MIN_RUNNER_VERSION
+    require_signed_dispatch: bool = False
 
 
 class Blackboard:
@@ -171,10 +172,30 @@ class Blackboard:
             ("tenant", "TEXT"),
             ("workspace_root", "TEXT"),
             ("require_base_commit", "INTEGER NOT NULL DEFAULT 0"),
+            # M2.4: signed-dispatch column. Nullable so legacy bearer-only
+            # dispatches keep working when require_signed_dispatch=False.
+            ("dispatcher_id", "TEXT"),
         ]
         for col, decl in additions:
             if col not in existing:
                 conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} {decl}")
+
+        # M2.4: dispatcher registry. Mirror of ``runners`` but for the
+        # other end of the protocol.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS dispatchers (
+                dispatcher_id  TEXT PRIMARY KEY,
+                public_key     TEXT NOT NULL,
+                label          TEXT NOT NULL,
+                hostname       TEXT,
+                metadata       TEXT NOT NULL DEFAULT '{}',
+                first_seen     TEXT NOT NULL DEFAULT (datetime('now')),
+                last_seen      TEXT NOT NULL DEFAULT (datetime('now')),
+                last_nonce     TEXT
+            )
+            """
+        )
 
     # ----------------------------------------------------------------- tasks
 
@@ -195,6 +216,7 @@ class Blackboard:
         tenant: str | None = None,
         workspace_root: str | None = None,
         require_base_commit: bool = False,
+        dispatcher_id: str | None = None,
     ) -> dict[str, Any]:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -204,8 +226,8 @@ class Blackboard:
                     todo_id, title, prompt, scope_globs, base_commit, branch,
                     timeout_minutes, priority, metadata,
                     required_tools, required_tags, tenant, workspace_root,
-                    require_base_commit
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    require_base_commit, dispatcher_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     todo_id,
@@ -222,6 +244,7 @@ class Blackboard:
                     tenant,
                     workspace_root,
                     1 if require_base_commit else 0,
+                    dispatcher_id,
                 ),
             )
             task_id = cur.lastrowid
@@ -856,6 +879,126 @@ class Blackboard:
             ).fetchone()
         return row["public_key"] if row else None
 
+    # ------------------------------------------------------------ dispatchers
+
+    def upsert_dispatcher(
+        self,
+        *,
+        dispatcher_id: str,
+        public_key: str,
+        label: str,
+        hostname: str | None,
+        metadata: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Insert or update a dispatcher row.
+
+        Caller must have already verified the self-attestation signature.
+        Re-binding ``dispatcher_id`` to a different ``public_key`` is
+        rejected; rotate by issuing a new ``dispatcher_id``.
+        """
+        now = _now_iso()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                "SELECT public_key, first_seen FROM dispatchers WHERE dispatcher_id = ?",
+                (dispatcher_id,),
+            ).fetchone()
+            if existing is not None and existing["public_key"] != public_key:
+                conn.execute("ROLLBACK")
+                raise PermissionError(
+                    "dispatcher_id is already bound to a different public_key"
+                )
+            first_seen = existing["first_seen"] if existing else now
+            conn.execute(
+                """
+                INSERT INTO dispatchers (
+                    dispatcher_id, public_key, label, hostname, metadata,
+                    first_seen, last_seen
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(dispatcher_id) DO UPDATE SET
+                    label     = excluded.label,
+                    hostname  = excluded.hostname,
+                    metadata  = excluded.metadata,
+                    last_seen = excluded.last_seen
+                """,
+                (
+                    dispatcher_id,
+                    public_key,
+                    label,
+                    hostname,
+                    json.dumps(metadata or {}),
+                    first_seen,
+                    now,
+                ),
+            )
+            conn.execute("COMMIT")
+        return self.get_dispatcher(dispatcher_id)
+
+    def get_dispatcher(self, dispatcher_id: str) -> dict[str, Any]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM dispatchers WHERE dispatcher_id = ?",
+                (dispatcher_id,),
+            ).fetchone()
+        if row is None:
+            raise KeyError(dispatcher_id)
+        record = dict(row)
+        try:
+            record["metadata"] = json.loads(record.get("metadata") or "{}")
+        except (TypeError, ValueError):
+            record["metadata"] = {}
+        return record
+
+    def list_dispatchers(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM dispatchers ORDER BY label, dispatcher_id"
+            ).fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            record = dict(row)
+            try:
+                record["metadata"] = json.loads(record.get("metadata") or "{}")
+            except (TypeError, ValueError):
+                record["metadata"] = {}
+            out.append(record)
+        return out
+
+    def dispatcher_public_key(self, dispatcher_id: str) -> str | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT public_key FROM dispatchers WHERE dispatcher_id = ?",
+                (dispatcher_id,),
+            ).fetchone()
+        return row["public_key"] if row else None
+
+    def consume_dispatcher_nonce(self, dispatcher_id: str, nonce: str) -> None:
+        """Atomically check-and-set ``last_nonce`` on a dispatcher.
+
+        Raises ``KeyError`` if the dispatcher is unknown and
+        ``PermissionError`` on replay. The check is the strict "reject if
+        last_nonce == nonce" form used for runners; combined with the 5
+        minute skew window this gives basic replay protection.
+        """
+        now = _now_iso()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT last_nonce FROM dispatchers WHERE dispatcher_id = ?",
+                (dispatcher_id,),
+            ).fetchone()
+            if row is None:
+                conn.execute("ROLLBACK")
+                raise KeyError(dispatcher_id)
+            if row["last_nonce"] is not None and row["last_nonce"] == nonce:
+                conn.execute("ROLLBACK")
+                raise PermissionError("nonce replay rejected")
+            conn.execute(
+                "UPDATE dispatchers SET last_nonce = ?, last_seen = ? WHERE dispatcher_id = ?",
+                (nonce, now, dispatcher_id),
+            )
+            conn.execute("COMMIT")
+
     @staticmethod
     def _derive_state(runner: dict[str, Any]) -> str:
         if runner.get("drain_requested"):
@@ -1213,6 +1356,60 @@ class NoteRequest(BaseModel):
     body: str = Field(..., min_length=1)
 
 
+# ---- M2.4: dispatcher signing ---------------------------------------------
+
+
+class RegisterDispatcherRequest(BaseModel):
+    """Self-attesting registration of a dispatcher's ed25519 public key.
+
+    Signed payload (canonical JSON, sort_keys, no whitespace) is::
+
+        {"op": "register-dispatcher",
+         "dispatcher_id": ...,
+         "public_key":    ...,
+         "timestamp":     ...,
+         "nonce":         ...}
+    """
+
+    dispatcher_id: str = Field(..., min_length=8, max_length=120)
+    public_key: str = Field(..., min_length=64, max_length=64)
+    label: str = Field(..., min_length=1, max_length=200)
+    hostname: str | None = Field(default=None, max_length=200)
+    metadata: dict[str, Any] | None = None
+    timestamp: int
+    nonce: str = Field(..., min_length=8, max_length=80)
+    signature: str
+
+
+class DispatchTaskSignedRequest(DispatchTaskRequest):
+    """Signed-dispatch envelope.
+
+    Identical to :class:`DispatchTaskRequest` plus the four signing fields.
+    Signed payload (canonical JSON) is::
+
+        {"op": "dispatch",
+         "dispatcher_id": ...,
+         "title": ...,
+         "prompt": ...,
+         "scope_globs": [...],
+         "base_commit": ...,
+         "branch": ...,
+         "timestamp": ...,
+         "nonce": ...}
+
+    The signature covers only the immutable fields above. Optional fields
+    (``todo_id``, ``timeout_minutes``, ``priority``, ``metadata``,
+    ``required_tools``, ``required_tags``, ``tenant``, ``workspace_root``,
+    ``require_base_commit``) are *not* in the signed payload -- they are
+    routing hints that the bearer token already authenticates.
+    """
+
+    dispatcher_id: str = Field(..., min_length=8, max_length=120)
+    timestamp: int
+    nonce: str = Field(..., min_length=8, max_length=80)
+    signature: str
+
+
 # ---------------------------------------------------------------------------
 # FastAPI app factory
 # ---------------------------------------------------------------------------
@@ -1254,6 +1451,16 @@ def create_app(config: BlackboardConfig) -> FastAPI:
 
     @app.post("/tasks", dependencies=[Depends(require_auth)])
     async def dispatch_task(payload: DispatchTaskRequest) -> dict[str, Any]:
+        # M2.4: when require_signed_dispatch is set, the legacy bearer-only
+        # path is closed. Clients must POST /tasks/v2 with a signed envelope.
+        if config.require_signed_dispatch:
+            raise HTTPException(
+                status_code=426,
+                detail=(
+                    "this hub requires signed dispatch envelopes; "
+                    "POST /tasks/v2 with a registered dispatcher key"
+                ),
+            )
         task = blackboard.create_task(
             title=payload.title,
             prompt=payload.prompt,
@@ -1309,6 +1516,99 @@ def create_app(config: BlackboardConfig) -> FastAPI:
         now = int(time.time())
         if abs(now - int(timestamp)) > SIGNATURE_MAX_SKEW_SECONDS:
             raise HTTPException(status_code=401, detail="timestamp out of skew window")
+
+    # ----- M2.4: dispatcher registry / signed dispatch ---------------------
+
+    @app.post("/dispatchers/register", dependencies=[Depends(require_auth)])
+    async def register_dispatcher(payload: RegisterDispatcherRequest) -> dict[str, Any]:
+        _check_skew(payload.timestamp)
+        signed = _signed_payload(
+            {
+                "op": "register-dispatcher",
+                "dispatcher_id": payload.dispatcher_id,
+                "public_key": payload.public_key,
+                "timestamp": payload.timestamp,
+                "nonce": payload.nonce,
+            }
+        )
+        if not verify_signature(payload.public_key, signed, payload.signature):
+            raise HTTPException(
+                status_code=403, detail="invalid dispatcher self-attestation"
+            )
+        try:
+            record = blackboard.upsert_dispatcher(
+                dispatcher_id=payload.dispatcher_id,
+                public_key=payload.public_key,
+                label=payload.label,
+                hostname=payload.hostname,
+                metadata=payload.metadata,
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        return {
+            "hub_protocol_version": PROTOCOL_VERSION,
+            "dispatcher": record,
+        }
+
+    @app.get("/dispatchers", dependencies=[Depends(require_auth)])
+    async def list_dispatchers() -> dict[str, Any]:
+        return {
+            "hub_protocol_version": PROTOCOL_VERSION,
+            "dispatchers": blackboard.list_dispatchers(),
+        }
+
+    @app.post("/tasks/v2", dependencies=[Depends(require_auth)])
+    async def dispatch_task_signed(
+        payload: DispatchTaskSignedRequest,
+    ) -> dict[str, Any]:
+        _check_skew(payload.timestamp)
+        public_key = blackboard.dispatcher_public_key(payload.dispatcher_id)
+        if public_key is None:
+            raise HTTPException(
+                status_code=404, detail="dispatcher not registered"
+            )
+        signed = _signed_payload(
+            {
+                "op": "dispatch",
+                "dispatcher_id": payload.dispatcher_id,
+                "title": payload.title,
+                "prompt": payload.prompt,
+                "scope_globs": list(payload.scope_globs),
+                "base_commit": payload.base_commit,
+                "branch": payload.branch,
+                "timestamp": payload.timestamp,
+                "nonce": payload.nonce,
+            }
+        )
+        if not verify_signature(public_key, signed, payload.signature):
+            raise HTTPException(status_code=403, detail="invalid dispatch signature")
+        try:
+            blackboard.consume_dispatcher_nonce(
+                payload.dispatcher_id, payload.nonce
+            )
+        except KeyError:
+            raise HTTPException(
+                status_code=404, detail="dispatcher not registered"
+            )
+        except PermissionError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        return blackboard.create_task(
+            title=payload.title,
+            prompt=payload.prompt,
+            scope_globs=payload.scope_globs,
+            base_commit=payload.base_commit,
+            branch=payload.branch,
+            todo_id=payload.todo_id,
+            timeout_minutes=payload.timeout_minutes,
+            priority=payload.priority,
+            metadata=payload.metadata,
+            required_tools=payload.required_tools,
+            required_tags=payload.required_tags,
+            tenant=payload.tenant,
+            workspace_root=payload.workspace_root,
+            require_base_commit=payload.require_base_commit,
+            dispatcher_id=payload.dispatcher_id,
+        )
 
     @app.post("/runners/register", dependencies=[Depends(require_auth)])
     async def register_runner(payload: RegisterRequest) -> dict[str, Any]:
@@ -1684,6 +1984,18 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
         help="Reject /runners/register from runners reporting a lower version.",
     )
+    parser.add_argument(
+        "--require-signed-dispatch",
+        action="store_true",
+        default=os.environ.get(
+            "FORGEWIRE_HUB_REQUIRE_SIGNED_DISPATCH", ""
+        ).lower()
+        in {"1", "true", "yes", "on"},
+        help=(
+            "Reject the legacy bearer-only POST /tasks. Clients must POST "
+            "/tasks/v2 with a registered dispatcher signature."
+        ),
+    )
     parser.add_argument("--log-level", default="info")
     parser.add_argument(
         "--mdns",
@@ -1709,6 +2021,7 @@ def main(argv: list[str] | None = None) -> None:
         host=args.host,
         port=args.port,
         min_runner_version=args.min_runner_version,
+        require_signed_dispatch=args.require_signed_dispatch,
     )
     logging.basicConfig(
         level=args.log_level.upper(),

@@ -205,6 +205,21 @@ def runner_identity(path: str | None) -> None:
 @click.option("--required-tag", "required_tags", multiple=True)
 @click.option("--required-tool", "required_tools", multiple=True)
 @click.option("--tenant", default=None)
+@click.option(
+    "--signed/--unsigned",
+    "signed",
+    default=None,
+    help=(
+        "Force signed (POST /tasks/v2) or unsigned (POST /tasks) dispatch. "
+        "Default: signed if a dispatcher identity file exists, else unsigned."
+    ),
+)
+@click.option(
+    "--identity",
+    "identity_path",
+    default=None,
+    help="Path to a dispatcher_identity.json (default: ~/.forgewire/dispatcher_identity.json).",
+)
 def dispatch(
     prompt: str,
     title: str | None,
@@ -217,6 +232,8 @@ def dispatch(
     required_tags: tuple[str, ...],
     required_tools: tuple[str, ...],
     tenant: str | None,
+    signed: bool | None,
+    identity_path: str | None,
 ) -> None:
     payload = {
         "title": title or prompt[:60],
@@ -233,11 +250,99 @@ def dispatch(
     }
     payload = {k: v for k, v in payload.items() if v is not None}
 
-    async def _go() -> None:
-        async with _client() as c:
-            _print_json(await c.dispatch_task(payload))
+    # Decide signed vs unsigned. Auto: signed iff an identity file exists.
+    from forgewire.dispatcher.identity import (
+        DEFAULT_IDENTITY_PATH,
+        load_or_create,
+    )
 
-    _async(_go())
+    target_path = Path(identity_path) if identity_path else DEFAULT_IDENTITY_PATH
+    use_signed = signed if signed is not None else target_path.exists()
+
+    if use_signed:
+        ident = load_or_create(target_path)
+        _async(_dispatch_signed(ident, payload))
+    else:
+        async def _go() -> None:
+            async with _client() as c:
+                _print_json(await c.dispatch_task(payload))
+
+        _async(_go())
+
+
+async def _dispatch_signed(ident: Any, payload: dict[str, Any]) -> None:
+    """Sign and POST to /tasks/v2, auto-registering the dispatcher on 404."""
+    import json as _json
+    import secrets as _secrets
+    import socket as _socket
+    import time as _time
+
+    timestamp = int(_time.time())
+    nonce = _secrets.token_hex(16)
+    signed_body = {
+        "op": "dispatch",
+        "dispatcher_id": ident.dispatcher_id,
+        "title": payload["title"],
+        "prompt": payload["prompt"],
+        "scope_globs": list(payload["scope_globs"]),
+        "base_commit": payload["base_commit"],
+        "branch": payload["branch"],
+        "timestamp": timestamp,
+        "nonce": nonce,
+    }
+    canonical = _json.dumps(signed_body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    sig = ident.sign(canonical)
+    full = dict(payload)
+    full.update(
+        {
+            "dispatcher_id": ident.dispatcher_id,
+            "timestamp": timestamp,
+            "nonce": nonce,
+            "signature": sig,
+        }
+    )
+    async with _client() as c:
+        try:
+            _print_json(await c.dispatch_task_signed(full))
+            return
+        except Exception as exc:  # noqa: BLE001 - we re-raise non-404
+            status = getattr(exc, "status_code", None)
+            if status != 404:
+                raise
+        # Auto-register on first signed dispatch and retry once.
+        click.echo("Registering dispatcher with hub on first use...", err=True)
+        reg_ts = int(_time.time())
+        reg_nonce = _secrets.token_hex(16)
+        reg_body = {
+            "op": "register-dispatcher",
+            "dispatcher_id": ident.dispatcher_id,
+            "public_key": ident.public_key_hex,
+            "timestamp": reg_ts,
+            "nonce": reg_nonce,
+        }
+        reg_canon = _json.dumps(reg_body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        reg_sig = ident.sign(reg_canon)
+        await c.register_dispatcher(
+            {
+                "dispatcher_id": ident.dispatcher_id,
+                "public_key": ident.public_key_hex,
+                "label": ident.label,
+                "hostname": _socket.gethostname(),
+                "timestamp": reg_ts,
+                "nonce": reg_nonce,
+                "signature": reg_sig,
+            }
+        )
+        # Re-sign with a fresh nonce/timestamp and retry the dispatch.
+        timestamp = int(_time.time())
+        nonce = _secrets.token_hex(16)
+        signed_body["timestamp"] = timestamp
+        signed_body["nonce"] = nonce
+        canonical = _json.dumps(signed_body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        full["timestamp"] = timestamp
+        full["nonce"] = nonce
+        full["signature"] = ident.sign(canonical)
+        _print_json(await c.dispatch_task_signed(full))
 
 
 # ---------------------------------------------------------------------------
@@ -323,6 +428,39 @@ def keys_init(path: str | None) -> None:
             "public_key": ident.public_key_hex,
         }
     )
+
+
+@keys.command(
+    "init-dispatcher",
+    help="Generate (or load) the dispatcher identity file used for signed dispatch.",
+)
+@click.option("--path", default=None)
+@click.option("--label", default=None, help="Freeform label (default: hostname).")
+def keys_init_dispatcher(path: str | None, label: str | None) -> None:
+    from forgewire.dispatcher.identity import load_or_create
+
+    ident = load_or_create(Path(path) if path else None, label=label)
+    _print_json(
+        {
+            "dispatcher_id": ident.dispatcher_id,
+            "public_key": ident.public_key_hex,
+            "label": ident.label,
+        }
+    )
+
+
+@cli.group("dispatchers", help="Inspect registered dispatchers.")
+def dispatchers_group() -> None:
+    pass
+
+
+@dispatchers_group.command("list", help="List dispatchers known to the hub.")
+def dispatchers_list() -> None:
+    async def _go() -> None:
+        async with _client() as c:
+            _print_json(await c.list_dispatchers())
+
+    _async(_go())
 
 
 @cli.group(help="Token utilities.")
