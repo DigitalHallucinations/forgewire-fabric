@@ -46,7 +46,7 @@ from forgewire.hub.client import (
 )
 from forgewire.hub.mcp_common import ToolRegistry
 
-LOGGER = logging.getLogger("phrenforge.remote.dispatcher_mcp")
+LOGGER = logging.getLogger("forgewire.dispatcher_mcp")
 
 TERMINAL_STATES = {"done", "failed", "cancelled", "timed_out"}
 

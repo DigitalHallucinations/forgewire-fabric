@@ -52,9 +52,14 @@ from forgewire.hub._router import pick_task as _router_pick_task
 from forgewire.hub._streams import HAS_RUST as _HUB_STREAMS_HAS_RUST
 from forgewire.hub._streams import make_counter as _make_stream_counter
 
-LOGGER = logging.getLogger("phrenforge.remote.blackboard")
+LOGGER = logging.getLogger("forgewire.hub")
 
-DEFAULT_DB = Path.home() / ".phrenforge" / "remote_subagent.sqlite3"
+# Default DB lives under ~/.forgewire/ on a fresh install. The legacy
+# ~/.phrenforge/remote_subagent.sqlite3 path is auto-migrated on first
+# start so existing PhrenForge installs upgrade in place; once moved,
+# the legacy file is left behind for operator visibility.
+DEFAULT_DB = Path.home() / ".forgewire" / "hub.sqlite3"
+_LEGACY_DEFAULT_DB = Path.home() / ".phrenforge" / "remote_subagent.sqlite3"
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 PROGRESS_POLL_SECONDS = 1.0
 DEFAULT_PORT = 8765
@@ -126,6 +131,31 @@ class Blackboard:
     def __init__(self, db_path: Path) -> None:
         self._db_path = db_path
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
+        # One-shot legacy migration: if the operator hasn't pointed
+        # FORGEWIRE_HUB_DB_PATH anywhere and the canonical path doesn't
+        # exist yet, but a PhrenForge-era ~/.phrenforge/remote_subagent.sqlite3
+        # does, copy it across so existing fleets keep their task history.
+        if (
+            db_path == DEFAULT_DB
+            and not db_path.exists()
+            and _LEGACY_DEFAULT_DB.exists()
+        ):
+            try:
+                import shutil
+
+                shutil.copy2(_LEGACY_DEFAULT_DB, db_path)
+                LOGGER.info(
+                    "Migrated legacy hub DB %s -> %s",
+                    _LEGACY_DEFAULT_DB,
+                    db_path,
+                )
+            except OSError as exc:  # pragma: no cover - migration is advisory
+                LOGGER.warning(
+                    "Legacy hub DB migration failed (%s -> %s): %s",
+                    _LEGACY_DEFAULT_DB,
+                    db_path,
+                    exc,
+                )
         self._init_schema()
         # Stage C.3: in-memory per-task stream-seq counter. Resets on hub
         # restart and re-primes lazily from MAX(seq) in SQLite, so kill -9
@@ -1417,7 +1447,7 @@ class DispatchTaskSignedRequest(DispatchTaskRequest):
 
 def create_app(config: BlackboardConfig) -> FastAPI:
     app = FastAPI(
-        title="PhrenForge Remote Subagent Blackboard",
+        title="ForgeWire Hub",
         version="0.1.0",
     )
     blackboard = Blackboard(config.db_path)

@@ -343,3 +343,13 @@ def load_client_from_env() -> BlackboardClient:
         )
     return BlackboardClient(base, token)
 
+
+# ---------------------------------------------------------------------------
+# Canonical name (M2.1 rebrand). ``BlackboardClient`` is kept as a legacy
+# alias for one minor cycle so PhrenForge installs that pinned an earlier
+# forgewire continue to import without code changes; new code should use
+# :class:`HubClient`.
+# ---------------------------------------------------------------------------
+
+HubClient = BlackboardClient
+HubError = BlackboardError

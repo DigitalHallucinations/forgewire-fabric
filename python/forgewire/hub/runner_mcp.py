@@ -64,7 +64,7 @@ from forgewire.runner.runner_capabilities import (
 )
 
 
-LOGGER = logging.getLogger("phrenforge.remote.runner_mcp")
+LOGGER = logging.getLogger("forgewire.runner_mcp")
 
 PROTOCOL_VERSION = 2
 HEARTBEAT_INTERVAL_SECONDS = 20

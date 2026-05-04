@@ -23,7 +23,7 @@ import socket
 from dataclasses import dataclass
 from typing import Any
 
-LOGGER = logging.getLogger("phrenforge.remote.discovery")
+LOGGER = logging.getLogger("forgewire.discovery")
 
 SERVICE_TYPE = "_forgewire-hub._tcp.local."
 
@@ -80,7 +80,7 @@ def advertise_hub(
         LOGGER.debug("zeroconf not installed; skipping hub mDNS advertisement")
         return None
 
-    hostname = socket.gethostname().split(".", 1)[0] or "phrenforge-hub"
+    hostname = socket.gethostname().split(".", 1)[0] or "forgewire-hub"
     name = instance_name or f"{hostname}.{SERVICE_TYPE}"
     address = _local_ipv4()
     properties = {
