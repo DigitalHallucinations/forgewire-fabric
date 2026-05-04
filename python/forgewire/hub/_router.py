@@ -6,7 +6,7 @@ mirrors `Blackboard.claim_next_task_v2`'s candidate match loop.
 
 Operators can force the Python path with ``FORGEWIRE_FORCE_PYTHON=1``.
 
-Stage C.2 of PhrenForge todo 113 (forgewire-runtime).
+Lineage: Stage C.2 of the forgewire-runtime extraction (formerly PhrenForge todo 113).
 """
 
 from __future__ import annotations

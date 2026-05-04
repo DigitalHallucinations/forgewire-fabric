@@ -21,19 +21,20 @@ Tools surfaced to the local Copilot agent in the runner chat mode:
 * ``self_update``        -- git fetch + ff-merge the runner workspace
 * ``runner_identity``    -- inspect runner_id, hostname, capabilities, state
 
-``BLACKBOARD_URL`` should be ``http://127.0.0.1:<port>`` since runner and hub
+``FORGEWIRE_HUB_URL`` should be ``http://127.0.0.1:<port>`` since runner and hub
 are colocated.
 
-Optional env knobs:
-  PHRENFORGE_RUNNER_TAGS=foo,bar          -- runner-declared tags
-  PHRENFORGE_RUNNER_SCOPE_PREFIXES=...    -- comma-separated path prefixes the
-                                             runner is allowed to write
-  PHRENFORGE_RUNNER_TENANT=name           -- tenant id for multi-tenant routing
-  PHRENFORGE_RUNNER_WORKSPACE_ROOT=path   -- absolute path of the runner's clone
-  PHRENFORGE_RUNNER_MAX_CONCURRENT=N      -- task concurrency cap (default 1)
-  PHRENFORGE_RUNNER_VERSION=str           -- override version string
-  PHRENFORGE_RUNNER_AUTOUPDATE=1          -- git fetch+ff-merge before claim
-  PHRENFORGE_RUNNER_AUTOUPDATE_BRANCH=main -- branch to fast-forward (default main)
+Optional env knobs (canonical names; ``PHRENFORGE_RUNNER_*`` legacy aliases
+are also honoured for one minor cycle):
+  FORGEWIRE_RUNNER_TAGS=foo,bar          -- runner-declared tags
+  FORGEWIRE_RUNNER_SCOPE_PREFIXES=...    -- comma-separated path prefixes the
+                                            runner is allowed to write
+  FORGEWIRE_RUNNER_TENANT=name           -- tenant id for multi-tenant routing
+  FORGEWIRE_RUNNER_WORKSPACE_ROOT=path   -- absolute path of the runner's clone
+  FORGEWIRE_RUNNER_MAX_CONCURRENT=N      -- task concurrency cap (default 1)
+  FORGEWIRE_RUNNER_VERSION=str           -- override version string
+  FORGEWIRE_RUNNER_AUTOUPDATE=1          -- git fetch+ff-merge before claim
+  FORGEWIRE_RUNNER_AUTOUPDATE_BRANCH=main -- branch to fast-forward (default main)
 """
 
 from __future__ import annotations
@@ -185,10 +186,13 @@ class RunnerSession:
         self.last_heartbeat_ok: bool = False
         self.last_register_response: dict[str, Any] | None = None
         self.autoupdate_enabled: bool = _truthy(
-            os.environ.get("PHRENFORGE_RUNNER_AUTOUPDATE")
+            os.environ.get("FORGEWIRE_RUNNER_AUTOUPDATE")
+            or os.environ.get("PHRENFORGE_RUNNER_AUTOUPDATE")
         )
         self.autoupdate_branch: str = (
-            os.environ.get("PHRENFORGE_RUNNER_AUTOUPDATE_BRANCH") or "main"
+            os.environ.get("FORGEWIRE_RUNNER_AUTOUPDATE_BRANCH")
+            or os.environ.get("PHRENFORGE_RUNNER_AUTOUPDATE_BRANCH")
+            or "main"
         )
         self.last_autoupdate_ts: float = 0.0
         self.last_autoupdate_result: dict[str, Any] | None = None
@@ -282,12 +286,32 @@ class RunnerSession:
 
 def _build_session(client: BlackboardClient) -> RunnerSession:
     identity = load_or_create()
-    workspace_root = os.environ.get("PHRENFORGE_RUNNER_WORKSPACE_ROOT") or os.getcwd()
-    tags = _parse_csv(os.environ.get("PHRENFORGE_RUNNER_TAGS"))
-    scope_prefixes = _parse_csv(os.environ.get("PHRENFORGE_RUNNER_SCOPE_PREFIXES"))
-    tenant = os.environ.get("PHRENFORGE_RUNNER_TENANT") or None
-    max_concurrent = int(os.environ.get("PHRENFORGE_RUNNER_MAX_CONCURRENT", "1"))
-    runner_version = os.environ.get("PHRENFORGE_RUNNER_VERSION", DEFAULT_VERSION)
+    workspace_root = (
+        os.environ.get("FORGEWIRE_RUNNER_WORKSPACE_ROOT")
+        or os.environ.get("PHRENFORGE_RUNNER_WORKSPACE_ROOT")
+        or os.getcwd()
+    )
+    tags = _parse_csv(
+        os.environ.get("FORGEWIRE_RUNNER_TAGS")
+        or os.environ.get("PHRENFORGE_RUNNER_TAGS")
+    )
+    scope_prefixes = _parse_csv(
+        os.environ.get("FORGEWIRE_RUNNER_SCOPE_PREFIXES")
+        or os.environ.get("PHRENFORGE_RUNNER_SCOPE_PREFIXES")
+    )
+    tenant = (
+        os.environ.get("FORGEWIRE_RUNNER_TENANT")
+        or os.environ.get("PHRENFORGE_RUNNER_TENANT")
+        or None
+    )
+    max_concurrent = int(
+        os.environ.get("FORGEWIRE_RUNNER_MAX_CONCURRENT")
+        or os.environ.get("PHRENFORGE_RUNNER_MAX_CONCURRENT", "1")
+    )
+    runner_version = (
+        os.environ.get("FORGEWIRE_RUNNER_VERSION")
+        or os.environ.get("PHRENFORGE_RUNNER_VERSION", DEFAULT_VERSION)
+    )
     return RunnerSession(
         client,
         identity,
@@ -552,7 +576,7 @@ def _register_tools(registry: ToolRegistry, session: RunnerSession) -> None:
         description=(
             "Run ``git fetch`` + ``git merge --ff-only origin/<branch>`` in "
             "the runner workspace. Returns the old/new head commits. Auto-"
-            "invoked before every claim when PHRENFORGE_RUNNER_AUTOUPDATE=1."
+            "invoked before every claim when FORGEWIRE_RUNNER_AUTOUPDATE=1."
         ),
         input_schema={
             "type": "object",
@@ -594,13 +618,13 @@ async def _run() -> None:
     client = load_client_from_env()
     session = _build_session(client)
     LOGGER.info(
-        "phrenforge runner MCP starting as runner_id=%s host=%s",
+        "forgewire runner MCP starting as runner_id=%s host=%s",
         session.runner_id,
         session.host["hostname"],
     )
     await _register_with_retries(session)
     heartbeat_task = asyncio.create_task(_heartbeat_loop(session))
-    server = Server("phrenforge-runner")
+    server = Server("forgewire-runner")
     registry = ToolRegistry()
     _register_tools(registry, session)
     registry.bind(server)

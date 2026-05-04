@@ -18,12 +18,12 @@ Run via stdio from VS Code's ``.vscode/mcp.json``::
 
     {
       "servers": {
-        "phrenforge-dispatcher": {
+        "forgewire-dispatcher": {
           "command": "python",
           "args": ["-m", "forgewire.hub.dispatcher_mcp"],
           "env": {
-            "BLACKBOARD_URL": "http://10.220.190.95:8765",
-            "BLACKBOARD_TOKEN_FILE": "${userHome}/.phrenforge/blackboard.token"
+            "FORGEWIRE_HUB_URL": "http://10.220.190.95:8765",
+            "FORGEWIRE_HUB_TOKEN_FILE": "${userHome}/.forgewire/hub.token"
           }
         }
       }
@@ -332,10 +332,10 @@ def _register_tools(registry: ToolRegistry, client: BlackboardClient) -> None:
     registry.register(
         name="discover_hub",
         description=(
-            "Browse the local LAN via mDNS for PhrenForge hubs advertising "
-            "_phrenforge-hub._tcp. Returns hub host/port/protocol_version. "
-            "Useful for first-run dispatcher bootstrap when BLACKBOARD_URL is "
-            "not yet configured. Requires the optional 'zeroconf' package."
+            "Browse the local LAN via mDNS for ForgeWire hubs advertising "
+            "_forgewire-hub._tcp. Returns hub host/port/protocol_version. "
+            "Useful for first-run dispatcher bootstrap when FORGEWIRE_HUB_URL "
+            "is not yet configured. Requires the optional 'zeroconf' package."
         ),
         input_schema={
             "type": "object",
@@ -350,7 +350,7 @@ def _register_tools(registry: ToolRegistry, client: BlackboardClient) -> None:
 async def _run() -> None:
     logging.basicConfig(level=logging.INFO)
     client = load_client_from_env()
-    server = Server("phrenforge-dispatcher")
+    server = Server("forgewire-dispatcher")
     registry = ToolRegistry()
     _register_tools(registry, client)
     registry.bind(server)

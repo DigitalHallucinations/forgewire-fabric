@@ -6,7 +6,7 @@ pure-Python equivalent that mirrors the contract one-for-one.
 
 Operators can force the Python path with ``FORGEWIRE_FORCE_PYTHON=1``.
 
-Stage C.3 of PhrenForge todo 113 (forgewire-runtime).
+Lineage: Stage C.3 of the forgewire-runtime extraction (formerly PhrenForge todo 113).
 
 The counter assigns strictly-increasing per-task sequence numbers in-memory.
 SQLite still owns durability (the hub still INSERTs every line); the counter

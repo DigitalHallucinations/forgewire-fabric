@@ -1,7 +1,7 @@
 """Shared helpers for the dispatcher and runner MCP servers.
 
 Centralises:
-* server construction with the same MCP SDK style PhrenForge already uses,
+* server construction with the standard MCP SDK style,
 * tool registration helpers,
 * a small JSON-arg unpack so each tool stays under 30 lines.
 """

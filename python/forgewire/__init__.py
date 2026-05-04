@@ -9,7 +9,8 @@ Top-level package. The two main entry points users care about are:
   with a hub. Standalone runners can be started with ``forgewire runner start``.
 
 Public Python API surface is intentionally small. Everything heavy lives behind
-:class:`forgewire.hub.client.BlackboardClient` (HTTP) and the FastAPI app at
+:class:`forgewire.hub.client.HubClient` (HTTP, formerly ``BlackboardClient``,
+which is retained as a one-cycle alias) and the FastAPI app at
 :mod:`forgewire.hub.server`. The Rust acceleration crates are loaded
 transparently as ``forgewire_runtime`` when available; pure-Python fallbacks
 are always present.

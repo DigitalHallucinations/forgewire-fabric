@@ -6,7 +6,7 @@ pure-Python ed25519 path.
 
 Operators can force the Python path with ``FORGEWIRE_FORCE_PYTHON=1``.
 
-Stage C.1 of PhrenForge todo 113 (forgewire-runtime).
+Lineage: Stage C.1 of the forgewire-runtime extraction (formerly PhrenForge todo 113).
 """
 
 from __future__ import annotations

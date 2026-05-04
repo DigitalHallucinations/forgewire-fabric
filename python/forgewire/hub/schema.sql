@@ -1,4 +1,4 @@
--- PhrenForge remote-subagent blackboard schema (v1).
+-- ForgeWire hub schema (v1).
 -- Designed so a future modules/remote_subagent/ can absorb this file in
 -- place without migration.
 

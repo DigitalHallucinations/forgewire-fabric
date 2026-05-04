@@ -1,16 +1,17 @@
-"""PhrenForge remote-subagent blackboard HTTP/SSE service.
+"""ForgeWire hub HTTP/SSE service.
 
-Runs on the always-on hub host (currently the OptiPlex 7050). Exposes a small
-REST + SSE API used by:
+Runs on the always-on hub host. Exposes a small REST + SSE API used by:
 
 * the dispatcher MCP server (driver host, drives the queue from the main
   agent), reaching the hub over the LAN, and
 * the runner MCP server (colocated on the hub), reaching the hub on
   localhost.
 
-Auth: bearer token from ``BLACKBOARD_TOKEN`` env (or ``--token-file`` path).
-Storage: SQLite WAL at ``BLACKBOARD_DB_PATH`` (default
-``~/.phrenforge/remote_subagent.sqlite3``).
+Auth: bearer token from ``FORGEWIRE_HUB_TOKEN`` env (or ``--token-file`` path).
+Legacy alias ``BLACKBOARD_TOKEN`` is also honoured.
+Storage: SQLite WAL at ``FORGEWIRE_HUB_DB_PATH`` (default
+``~/.forgewire/hub.sqlite3``). On first start, an existing
+``~/.phrenforge/remote_subagent.sqlite3`` is auto-copied for one-shot upgrade.
 
 Run::
 
