@@ -22,7 +22,7 @@ This repository is **extracted from [PhrenForge](https://github.com/DigitalHallu
 | `python/forgewire/runner` | ✅ Standalone claim-loop agent, `forgewire runner start`. |
 | `forgewire` CLI (Click) | ✅ `hub`, `runner`, `dispatch`, `tasks`, `runners`, `keys`, `token`. |
 | `tests/` | ✅ End-to-end + parity tests. |
-| VS Code extension | 📋 Planned (M2.2). |
+| VS Code extension | ✅ Cross-OS GUI in [`vscode/`](vscode). Connect, dispatch, tail streams, start a hub or runner with one command. |
 | NSSM/systemd/launchd installers | 📋 Planned (M2.3). |
 
 ---
@@ -50,6 +50,21 @@ forgewire tasks stream <id>
 ```
 
 Full guide: [`docs/QUICKSTART.md`](docs/QUICKSTART.md).
+
+### Or use the VS Code extension
+
+For a cross-platform GUI (Windows / macOS / Linux), install the extension
+from [`vscode/`](vscode):
+
+```bash
+cd vscode && npm install && npm run package
+code --install-extension forgewire-0.1.0.vsix
+```
+
+Then run **ForgeWire: Connect to Hub** from the command palette. The
+extension can also `pip install` the CLI, start a hub, or register a
+runner on the current machine — useful for joining new boxes to a cluster
+without touching a terminal. See [`vscode/README.md`](vscode/README.md).
 
 ---
 

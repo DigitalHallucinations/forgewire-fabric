@@ -143,12 +143,35 @@ via `forgewire.runner.run_runner(executor=...)`.
 
 ## 5. (Optional) Use the VS Code extension
 
-See [`docs/vscode.md`](vscode.md) once Stage B ships. The TL;DR will be:
+A cross-platform GUI lives in [`vscode/`](../vscode). It works on Windows,
+macOS, and Linux — anywhere VS Code runs.
 
-1. Install the **ForgeWire** extension from the marketplace.
-2. Run **ForgeWire: Connect to Hub** and paste your URL + token.
-3. Use the **Dispatch Task** webview to send work; output streams to the
-   ForgeWire output channel.
+For now, install from the packaged VSIX (marketplace listing pending):
+
+```bash
+# from a clone of the repo
+cd vscode
+npm install
+npm run package
+code --install-extension forgewire-0.1.0.vsix
+```
+
+Then in VS Code:
+
+1. Open the **ForgeWire** activity bar item.
+2. Run **ForgeWire: Connect to Hub** (Ctrl+Shift+P) and paste your URL + token.
+   The token is stored in VS Code SecretStorage.
+3. Browse runners + tasks live in the sidebar. Use **ForgeWire: Dispatch
+   Task** to send work; right-click a task to **Tail Task Stream**.
+
+If a machine doesn't have the CLI installed yet, run **ForgeWire: Install /
+Update CLI** to `pip install --upgrade forgewire` against the Python
+interpreter VS Code already knows about. From there, **Start Hub Here** or
+**Start Runner Here** will turn that machine into a hub or runner without
+ever leaving the editor.
+
+See [`vscode/README.md`](../vscode/README.md) for the full command and
+settings reference.
 
 ---
 
