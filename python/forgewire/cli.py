@@ -115,6 +115,23 @@ def hub_healthz() -> None:
     _async(_go())
 
 
+@hub.command("install", help="Install the hub as an OS service (NSSM/systemd/launchd).")
+@click.option("--port", type=int, default=8765, show_default=True)
+@click.option("--host", default="0.0.0.0", show_default=True)
+@click.option("--token", default=None, help="Bearer token. If omitted a fresh 32-hex token is generated (Windows only).")
+def hub_install(port: int, host: str, token: str | None) -> None:
+    from forgewire.install import install_hub
+
+    install_hub(port=port, host=host, token=token)
+
+
+@hub.command("uninstall", help="Remove the hub OS service.")
+def hub_uninstall() -> None:
+    from forgewire.install import uninstall_hub
+
+    uninstall_hub()
+
+
 # ---------------------------------------------------------------------------
 # runner
 # ---------------------------------------------------------------------------
@@ -186,6 +203,23 @@ def runner_identity(path: str | None) -> None:
             "public_key": ident.public_key_hex,
         }
     )
+
+
+@runner.command("install", help="Install the runner as an OS service (NSSM/systemd/launchd).")
+@click.option("--hub-url", required=True, envvar="FORGEWIRE_HUB_URL")
+@click.option("--hub-token", required=True, envvar="FORGEWIRE_HUB_TOKEN")
+@click.option("--workspace-root", required=True, help="Per-runner workspace root.")
+def runner_install(hub_url: str, hub_token: str, workspace_root: str) -> None:
+    from forgewire.install import install_runner
+
+    install_runner(hub_url=hub_url, hub_token=hub_token, workspace_root=workspace_root)
+
+
+@runner.command("uninstall", help="Remove the runner OS service.")
+def runner_uninstall() -> None:
+    from forgewire.install import uninstall_runner
+
+    uninstall_runner()
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,57 @@
+[Unit]
+Description=ForgeWire Hub (signed remote dispatch fabric)
+Documentation=https://github.com/DigitalHallucinations/forgewire
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# --- Edit these for your install ---------------------------------------------
+User=forgewire
+Group=forgewire
+WorkingDirectory=/var/lib/forgewire
+
+# Path to a Python interpreter that has `forgewire` installed (system Python or
+# a dedicated venv). Update this if you installed into a venv.
+Environment=PYTHON=/usr/bin/python3
+Environment=FORGEWIRE_HUB_TOKEN_FILE=/etc/forgewire/hub.token
+Environment=FORGEWIRE_HUB_DB_PATH=/var/lib/forgewire/hub.sqlite3
+Environment=FORGEWIRE_HUB_HOST=0.0.0.0
+Environment=FORGEWIRE_HUB_PORT=8765
+# -----------------------------------------------------------------------------
+
+ExecStart=/bin/sh -c '${PYTHON} -m forgewire.cli hub start \
+    --host ${FORGEWIRE_HUB_HOST} \
+    --port ${FORGEWIRE_HUB_PORT} \
+    --db-path ${FORGEWIRE_HUB_DB_PATH}'
+
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=20s
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/forgewire /var/log/forgewire
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=forgewire-hub
+
+[Install]
+WantedBy=multi-user.target

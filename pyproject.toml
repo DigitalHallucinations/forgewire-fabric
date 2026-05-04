@@ -67,4 +67,11 @@ package-dir = { "" = "python" }
 where = ["python"]
 include = ["forgewire*"]
 
+[tool.setuptools.package-data]
+forgewire = [
+    "_installer_assets/*.ps1",
+    "_installer_assets/systemd/*.service",
+    "_installer_assets/launchd/*.plist",
+]
+
 
