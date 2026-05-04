@@ -1,10 +1,40 @@
 # ForgeWire
 
-> **Work-graph-aware compute fabric.** Signed dispatch envelopes, scope-bound capability tokens, structured event streams, federated transport. Apache-2.0.
+> **Bring-your-own-compute for AI-assisted development.**  
+> A secure remote dispatch fabric for AI agents, developer machines, and trusted runners. Apache-2.0.
 
-ForgeWire is the control plane that lets a dispatcher hand a task to a remote runner over an authenticated wire — a capability-routed, audit-friendly substitute for "ssh + tmux + good intentions" used by AI agents, CI workers, and distributed inference fleets.
+ForgeWire lets VS Code, automation systems, and orchestration layers send scoped work to **machines you already control** using signed dispatch envelopes, capability-bound execution, structured event streams, and auditable results. It turns VS Code into a control surface for a private developer compute fabric — without renting someone else's cloud and without a tangle of SSH sessions and loose scripts.
 
-This repository is **extracted from [PhrenForge](https://github.com/DigitalHallucinations/PhrenForge)**. PhrenForge's runner integration, full operator docs, and mature test fleet still live there; this repo is the standalone, embeddable, third-party-consumable surface.
+## Origin
+
+ForgeWire began with a simple problem: one developer machine was not enough. The original goal was to let a Copilot-driven VS Code workflow on one machine dispatch work in parallel to another trusted machine, without turning the process into a pile of SSH sessions, loose scripts, and blind trust.
+
+Early versions reused a few pieces from [PhrenForge](https://github.com/DigitalHallucinations/PhrenForge), then the project evolved through iteration, crossed into the PhrenForge ecosystem, and was extracted back into a standalone project once the remote-dispatch fabric became useful on its own.
+
+## What ForgeWire is (and isn't)
+
+**ForgeWire is** a *remote machine and agent dispatch fabric*. It authenticates dispatchers, advertises runner capabilities, ships scoped work over a signed wire, streams events back, and persists results. It is useful as a standalone tool and as a bridge from larger systems (like PhrenForge) to remote workers.
+
+**ForgeWire is not** — yet — a full distributed compute runtime, work-graph scheduler, or cluster manager. It is not a drop-in replacement for Ray, Nomad, Kubernetes, Slurm, or Dask. It does not split a single job across nodes, manage GPU residency, or do heterogeneous bin-packing. Those capabilities are on the [roadmap](#roadmap-heterogeneous-private-compute) but the project is honest that today it is the *control plane*, not the compute layer.
+
+### Inside PhrenForge vs. standalone
+
+```text
+PhrenForge
+├─ Local dispatcher              ← stays in PhrenForge
+├─ Blackboard / shared state    ← stays in PhrenForge
+├─ Local tools, agents, workflows
+└─ ForgeWire bridge
+   ├─ Remote machine dispatch
+   ├─ Remote agent dispatch
+   ├─ Signed dispatch envelopes
+   ├─ Capability-scoped execution
+   └─ Event/result reporting back to PhrenForge blackboard
+```
+
+**Inside PhrenForge**, ForgeWire is the remote execution bridge. PhrenForge keeps its own local dispatcher and blackboard; ForgeWire handles authenticated dispatch to remote workers and returns telemetry and results into PhrenForge's coordination layer. ForgeWire does not replace those systems.
+
+**Standalone**, ForgeWire lets developers wire up trusted machines they already own as remote execution targets for VS Code/Copilot-style workflows: one development machine dispatches scoped work to another in parallel, and the editor watches the stream live.
 
 ---
 
@@ -124,9 +154,33 @@ stream counters when running large fleets.
 
 ---
 
-## Roadmap
+## Roadmap: Heterogeneous Private Compute
 
-This snapshot covers Phase 0 (foundations) and is the staging ground for Phase 2 (PyPI extraction, VS Code extension, installers). Phases 3–6 (federated overlay, work-aware fabric, audit/witnessing/replay, ecosystem) will be developed here once the extraction is clean.
+ForgeWire is **not currently** a full distributed compute runtime or cluster scheduler. The current focus is secure remote machine and agent dispatch, event streaming, and result reporting.
+
+However, ForgeWire lays the **control-plane foundation** for heterogeneous private compute: a future layer where trusted machines can advertise capabilities, receive scoped work, execute in parallel, stream state, and report results back to an originating controller such as PhrenForge.
+
+### Today — remote dispatch fabric
+
+- Send jobs to remote machines and agents
+- Authenticate dispatch (ed25519 + bearer token)
+- Check capability tags + scope globs before claim
+- Stream events / results over SSE
+- Report back to PhrenForge or another controller
+
+### Future — heterogeneous private compute fabric
+
+- Runner capability registry (CPU / GPU / RAM / OS / arch / toolchain / network location / trust level)
+- Heartbeats and health scoring
+- Runner pools and tags
+- Task affinity ("send GPU work to nodes with `gpu:nvidia` and high health")
+- Work-graph scheduling
+- Parallel dispatch groups
+- Retry and failover policies
+- Result aggregation across nodes
+- Local-network discovery (mDNS, partial today)
+- Optional PhrenForge blackboard reporting
+- Optional VS Code visualization of runner state
 
 Full plan: [DigitalHallucinations/PhrenForge → todos/114-forgewire-fabric](https://github.com/DigitalHallucinations/PhrenForge/tree/main/todos/114-forgewire-fabric).
 
