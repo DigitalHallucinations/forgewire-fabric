@@ -36,6 +36,7 @@ import os
 import secrets
 import sqlite3
 import time
+import calendar
 from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -1036,7 +1037,9 @@ class Blackboard:
             return "draining"
         try:
             last = time.strptime(runner["last_heartbeat"], "%Y-%m-%dT%H:%M:%SZ")
-            age = time.time() - time.mktime(last) + time.timezone
+            # last_heartbeat is UTC (trailing 'Z'); convert via calendar.timegm
+            # so we don't mix mktime's DST-aware offset with time.timezone.
+            age = time.time() - calendar.timegm(last)
         except Exception:
             return runner.get("state") or "online"
         if age >= HEARTBEAT_OFFLINE_SECONDS:
