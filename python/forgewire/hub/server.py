@@ -1971,8 +1971,11 @@ def create_app(config: BlackboardConfig) -> FastAPI:
 
 
 def _load_token(args: argparse.Namespace) -> str:
-    if args.token_file:
-        token = Path(args.token_file).read_text(encoding="utf-8").strip()
+    token_file = args.token_file or os.environ.get(
+        "FORGEWIRE_HUB_TOKEN_FILE"
+    ) or os.environ.get("BLACKBOARD_TOKEN_FILE")
+    if token_file:
+        token = Path(token_file).read_text(encoding="utf-8").strip()
     else:
         token = (
             os.environ.get("FORGEWIRE_HUB_TOKEN", "").strip()
