@@ -7,17 +7,17 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/fw-protocol",
-    "crates/fw-claim-router",
-    "crates/fw-streams",
-    "crates/fw-py",
+    "crates/fabric-protocol",
+    "crates/fabric-claim-router",
+    "crates/fabric-streams",
+    "crates/fabric-py",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/DigitalHallucinations/forgewire"
+repository = "https://github.com/DigitalHallucinations/forgewire-fabric"
 authors = ["Jeremy Shows <jeremyshws@gmail.com>"]
 
 [workspace.dependencies]
@@ -28,9 +28,9 @@ ed25519-dalek = { version = "2.1", default-features = false, features = ["std", 
 hex = "0.4"
 
 # Internal crates
-fw-protocol = { path = "crates/fw-protocol" }
-fw-claim-router = { path = "crates/fw-claim-router" }
-fw-streams = { path = "crates/fw-streams" }
+fabric-protocol = { path = "crates/fabric-protocol" }
+fabric-claim-router = { path = "crates/fabric-claim-router" }
+fabric-streams = { path = "crates/fabric-streams" }
 
 [profile.release]
 lto = "thin"

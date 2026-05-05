@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "forgewire"
+name = "forgewire-fabric"
 version = "0.1.0"
-description = "Work-graph-aware compute fabric: signed dispatch, scope-bound capability tokens, federated overlay. Apache-2.0."
+description = "ForgeWire Fabric — work-graph-aware compute fabric: signed dispatch, scope-bound capability tokens, federated overlay. Apache-2.0."
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Jeremy Shows", email = "jeremyshws@gmail.com" }]
@@ -50,25 +50,25 @@ test = [
     "pytest>=8.0",
     "pytest-asyncio>=1.0",
 ]
-all = ["forgewire[mdns,mcp,runtime,test]"]
+all = ["forgewire-fabric[mdns,mcp,runtime,test]"]
 
 [project.urls]
-Homepage = "https://github.com/DigitalHallucinations/forgewire"
-Repository = "https://github.com/DigitalHallucinations/forgewire"
-Issues = "https://github.com/DigitalHallucinations/forgewire/issues"
+Homepage = "https://github.com/DigitalHallucinations/forgewire-fabric"
+Repository = "https://github.com/DigitalHallucinations/forgewire-fabric"
+Issues = "https://github.com/DigitalHallucinations/forgewire-fabric/issues"
 
 [project.scripts]
-forgewire = "forgewire.cli:main"
+forgewire-fabric = "forgewire_fabric.cli:main"
 
 [tool.setuptools]
 package-dir = { "" = "python" }
 
 [tool.setuptools.packages.find]
 where = ["python"]
-include = ["forgewire*"]
+include = ["forgewire_fabric*"]
 
 [tool.setuptools.package-data]
-forgewire = [
+forgewire_fabric = [
     "_installer_assets/*.ps1",
     "_installer_assets/systemd/*.service",
     "_installer_assets/launchd/*.plist",

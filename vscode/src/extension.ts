@@ -1,7 +1,7 @@
 /**
  * ForgeWire VS Code extension entry point.
  *
- * Cross-platform, zero-native-deps. Drives the `forgewire` Python CLI for
+ * Cross-platform, zero-native-deps. Drives the `forgewire-fabric` Python CLI for
  * "start hub here" / "start runner here" / "install CLI"; talks to the hub
  * REST API directly for read-side views and dispatch.
  */
@@ -12,7 +12,7 @@ import * as vscode from "vscode";
 import { HubClient } from "./hubClient";
 import { RunnersProvider, TasksProvider } from "./treeProviders";
 
-const SECRET_TOKEN_KEY = "forgewire.hubToken";
+const SECRET_TOKEN_KEY = "forgewireFabric.hubToken";
 
 let outputChannel: vscode.OutputChannel;
 let statusItem: vscode.StatusBarItem;
@@ -27,11 +27,11 @@ let context: vscode.ExtensionContext;
 
 export async function activate(ctx: vscode.ExtensionContext): Promise<void> {
   context = ctx;
-  outputChannel = vscode.window.createOutputChannel("ForgeWire");
+  outputChannel = vscode.window.createOutputChannel("ForgeWire Fabric");
   ctx.subscriptions.push(outputChannel);
 
   statusItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 50);
-  statusItem.command = "forgewire.connectHub";
+  statusItem.command = "forgewireFabric.connectHub";
   ctx.subscriptions.push(statusItem);
   updateStatus();
 
@@ -41,29 +41,29 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<void> {
   runnersProvider = new RunnersProvider(getClient);
   tasksProvider = new TasksProvider(getClient);
   ctx.subscriptions.push(
-    vscode.window.registerTreeDataProvider("forgewire.runners", runnersProvider),
-    vscode.window.registerTreeDataProvider("forgewire.tasks", tasksProvider)
+    vscode.window.registerTreeDataProvider("forgewireFabric.runners", runnersProvider),
+    vscode.window.registerTreeDataProvider("forgewireFabric.tasks", tasksProvider)
   );
 
   ctx.subscriptions.push(
-    vscode.commands.registerCommand("forgewire.installCli", installCli),
-    vscode.commands.registerCommand("forgewire.connectHub", connectHub),
-    vscode.commands.registerCommand("forgewire.setToken", setToken),
-    vscode.commands.registerCommand("forgewire.disconnect", disconnect),
-    vscode.commands.registerCommand("forgewire.startHubHere", startHubHere),
-    vscode.commands.registerCommand("forgewire.startRunnerHere", startRunnerHere),
-    vscode.commands.registerCommand("forgewire.dispatchTask", dispatchTask),
-    vscode.commands.registerCommand("forgewire.refresh", refreshAll),
-    vscode.commands.registerCommand("forgewire.streamTask", streamTaskCmd),
-    vscode.commands.registerCommand("forgewire.cancelTask", cancelTaskCmd),
-    vscode.commands.registerCommand("forgewire.showTask", showTaskCmd),
-    vscode.commands.registerCommand("forgewire.copyToken", copyToken),
-    vscode.commands.registerCommand("forgewire.generateToken", generateToken)
+    vscode.commands.registerCommand("forgewireFabric.installCli", installCli),
+    vscode.commands.registerCommand("forgewireFabric.connectHub", connectHub),
+    vscode.commands.registerCommand("forgewireFabric.setToken", setToken),
+    vscode.commands.registerCommand("forgewireFabric.disconnect", disconnect),
+    vscode.commands.registerCommand("forgewireFabric.startHubHere", startHubHere),
+    vscode.commands.registerCommand("forgewireFabric.startRunnerHere", startRunnerHere),
+    vscode.commands.registerCommand("forgewireFabric.dispatchTask", dispatchTask),
+    vscode.commands.registerCommand("forgewireFabric.refresh", refreshAll),
+    vscode.commands.registerCommand("forgewireFabric.streamTask", streamTaskCmd),
+    vscode.commands.registerCommand("forgewireFabric.cancelTask", cancelTaskCmd),
+    vscode.commands.registerCommand("forgewireFabric.showTask", showTaskCmd),
+    vscode.commands.registerCommand("forgewireFabric.copyToken", copyToken),
+    vscode.commands.registerCommand("forgewireFabric.generateToken", generateToken)
   );
 
   ctx.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration("forgewire")) {
+      if (e.affectsConfiguration("forgewireFabric")) {
         updateStatus();
         scheduleRefresh();
         refreshAll();
@@ -92,12 +92,12 @@ function getClient(): HubClient | undefined {
 function updateStatus(): void {
   const c = getClient();
   if (c) {
-    statusItem.text = `$(plug) ForgeWire: ${labelForUrl(c.url)}`;
+    statusItem.text = `$(plug) ForgeWire Fabric: ${labelForUrl(c.url)}`;
     statusItem.tooltip = new vscode.MarkdownString(
       `Connected to **${c.url}**.\n\nClick to reconnect.`
     );
   } else {
-    statusItem.text = "$(debug-disconnect) ForgeWire";
+    statusItem.text = "$(debug-disconnect) ForgeWire Fabric";
     statusItem.tooltip = "Click to connect to a ForgeWire hub.";
   }
   statusItem.show();
@@ -116,7 +116,7 @@ function scheduleRefresh(): void {
   if (refreshTimer) {
     clearInterval(refreshTimer);
   }
-  const cfg = vscode.workspace.getConfiguration("forgewire");
+  const cfg = vscode.workspace.getConfiguration("forgewireFabric");
   const seconds = Math.max(2, cfg.get<number>("refreshIntervalSeconds") ?? 10);
   refreshTimer = setInterval(refreshAll, seconds * 1000);
 }
@@ -127,7 +127,7 @@ function refreshAll(): void {
 }
 
 async function hydrateTokenFromSecret(): Promise<void> {
-  const cfg = vscode.workspace.getConfiguration("forgewire");
+  const cfg = vscode.workspace.getConfiguration("forgewireFabric");
   if ((cfg.get<string>("hubToken") ?? "").trim().length > 0) {
     return;
   }
@@ -138,7 +138,7 @@ async function hydrateTokenFromSecret(): Promise<void> {
 }
 
 function pythonCommand(): string {
-  const cfg = vscode.workspace.getConfiguration("forgewire");
+  const cfg = vscode.workspace.getConfiguration("forgewireFabric");
   const explicit = (cfg.get<string>("pythonPath") ?? "").trim();
   if (explicit) {
     return quoteIfNeeded(explicit);
@@ -169,19 +169,19 @@ function getOrCreateTerminal(name: string, env?: Record<string, string>): vscode
 // ---------------------------------------------------------------------------
 
 async function installCli(): Promise<void> {
-  const term = getOrCreateTerminal("ForgeWire: install");
+  const term = getOrCreateTerminal("ForgeWire Fabric: install");
   term.show();
-  term.sendText(`${pythonCommand()} -m pip install --upgrade forgewire`);
+  term.sendText(`${pythonCommand()} -m pip install --upgrade forgewire-fabric`);
   vscode.window.showInformationMessage(
-    "Running `pip install --upgrade forgewire` in a terminal. Watch progress there."
+    "Running `pip install --upgrade forgewire-fabric` in a terminal. Watch progress there."
   );
 }
 
 async function connectHub(): Promise<void> {
-  const cfg = vscode.workspace.getConfiguration("forgewire");
+  const cfg = vscode.workspace.getConfiguration("forgewireFabric");
   const currentUrl = cfg.get<string>("hubUrl") ?? "";
   const url = await vscode.window.showInputBox({
-    title: "ForgeWire Hub URL",
+    title: "ForgeWire Fabric Hub URL",
     prompt: "e.g. http://hub.local:8765",
     value: currentUrl,
     ignoreFocusOut: true,
@@ -191,7 +191,7 @@ async function connectHub(): Promise<void> {
     return;
   }
   const token = await vscode.window.showInputBox({
-    title: "ForgeWire Hub Token",
+    title: "ForgeWire Fabric Hub Token",
     prompt: "Paste the bearer token (32+ hex chars). Stored in VS Code SecretStorage.",
     password: true,
     ignoreFocusOut: true,
@@ -206,13 +206,13 @@ async function connectHub(): Promise<void> {
 
   const client = HubClient.fromConfig();
   if (!client) {
-    vscode.window.showErrorMessage("ForgeWire: failed to construct client.");
+    vscode.window.showErrorMessage("ForgeWire Fabric: failed to construct client.");
     return;
   }
   try {
     const h = await client.healthz();
     vscode.window.showInformationMessage(
-      `ForgeWire: connected (protocol v${h.protocol_version}, hub v${h.version}).`
+      `ForgeWire Fabric: connected (protocol v${h.protocol_version}, hub v${h.version}).`
     );
   } catch (err) {
     vscode.window.showWarningMessage(
@@ -225,7 +225,7 @@ async function connectHub(): Promise<void> {
 
 async function setToken(): Promise<void> {
   const token = await vscode.window.showInputBox({
-    title: "ForgeWire Hub Token",
+    title: "ForgeWire Fabric Hub Token",
     password: true,
     ignoreFocusOut: true,
     validateInput: (v) => (v.trim().length >= 16 ? null : "Token must be at least 16 characters"),
@@ -234,33 +234,33 @@ async function setToken(): Promise<void> {
     return;
   }
   await vscode.workspace
-    .getConfiguration("forgewire")
+    .getConfiguration("forgewireFabric")
     .update("hubToken", token.trim(), vscode.ConfigurationTarget.Global);
   await context.secrets.store(SECRET_TOKEN_KEY, token.trim());
-  vscode.window.showInformationMessage("ForgeWire: hub token updated.");
+  vscode.window.showInformationMessage("ForgeWire Fabric: hub token updated.");
   updateStatus();
   refreshAll();
 }
 
 async function disconnect(): Promise<void> {
-  const cfg = vscode.workspace.getConfiguration("forgewire");
+  const cfg = vscode.workspace.getConfiguration("forgewireFabric");
   await cfg.update("hubUrl", "", vscode.ConfigurationTarget.Global);
   await cfg.update("hubToken", "", vscode.ConfigurationTarget.Global);
   await context.secrets.delete(SECRET_TOKEN_KEY);
   updateStatus();
   refreshAll();
-  vscode.window.showInformationMessage("ForgeWire: disconnected.");
+  vscode.window.showInformationMessage("ForgeWire Fabric: disconnected.");
 }
 
 async function copyToken(): Promise<void> {
-  const cfg = vscode.workspace.getConfiguration("forgewire");
+  const cfg = vscode.workspace.getConfiguration("forgewireFabric");
   const t = (cfg.get<string>("hubToken") ?? "").trim();
   if (!t) {
-    vscode.window.showWarningMessage("ForgeWire: no hub token configured.");
+    vscode.window.showWarningMessage("ForgeWire Fabric: no hub token configured.");
     return;
   }
   await vscode.env.clipboard.writeText(t);
-  vscode.window.showInformationMessage("ForgeWire: hub token copied to clipboard.");
+  vscode.window.showInformationMessage("ForgeWire Fabric: hub token copied to clipboard.");
 }
 
 async function generateToken(): Promise<void> {
@@ -270,7 +270,7 @@ async function generateToken(): Promise<void> {
   const tok = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
   await vscode.env.clipboard.writeText(tok);
   vscode.window.showInformationMessage(
-    "ForgeWire: generated hub token copied to clipboard. Use 'Set Hub Token\u2026' to save it."
+    "ForgeWire Fabric: generated hub token copied to clipboard. Use 'Set Hub Token\u2026' to save it."
   );
 }
 
@@ -279,7 +279,7 @@ async function generateToken(): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function startHubHere(): Promise<void> {
-  const cfg = vscode.workspace.getConfiguration("forgewire");
+  const cfg = vscode.workspace.getConfiguration("forgewireFabric");
   const port = await vscode.window.showInputBox({
     title: "Hub port",
     value: String(cfg.get<number>("autoStartHubPort") ?? 8765),
@@ -309,7 +309,7 @@ async function startHubHere(): Promise<void> {
       token = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
       await vscode.env.clipboard.writeText(token);
       vscode.window.showInformationMessage(
-        "ForgeWire: generated token copied to clipboard. Save it somewhere safe."
+        "ForgeWire Fabric: generated token copied to clipboard. Save it somewhere safe."
       );
     } else {
       const t = await vscode.window.showInputBox({
@@ -344,11 +344,11 @@ async function startHubHere(): Promise<void> {
   await cfg.update("hubToken", token, vscode.ConfigurationTarget.Global);
   await context.secrets.store(SECRET_TOKEN_KEY, token);
 
-  const term = getOrCreateTerminal("ForgeWire: hub", { FORGEWIRE_HUB_TOKEN: token });
+  const term = getOrCreateTerminal("ForgeWire Fabric: hub", { FORGEWIRE_HUB_TOKEN: token });
   term.show();
   const py = pythonCommand();
   term.sendText(
-    `${py} -m forgewire.cli hub start --host 0.0.0.0 --port ${port} --db-path "${dbPath}"`
+    `${py} -m forgewire_fabric.cli hub start --host 0.0.0.0 --port ${port} --db-path "${dbPath}"`
   );
   updateStatus();
   setTimeout(refreshAll, 2500);
@@ -379,15 +379,15 @@ async function startRunnerHere(): Promise<void> {
     value: "",
   });
 
-  const cfg = vscode.workspace.getConfiguration("forgewire");
+  const cfg = vscode.workspace.getConfiguration("forgewireFabric");
   const env: Record<string, string> = {
     FORGEWIRE_HUB_URL: c.url,
     FORGEWIRE_HUB_TOKEN: (cfg.get<string>("hubToken") ?? "").trim(),
   };
-  const term = getOrCreateTerminal("ForgeWire: runner", env);
+  const term = getOrCreateTerminal("ForgeWire Fabric: runner", env);
   term.show();
   const py = pythonCommand();
-  const parts = [`${py} -m forgewire.cli runner start`, `--workspace-root "${workspace}"`];
+  const parts = [`${py} -m forgewire_fabric.cli runner start`, `--workspace-root "${workspace}"`];
   if (tags?.trim()) {
     parts.push(`--tags "${tags.trim()}"`);
   }
@@ -409,7 +409,7 @@ async function dispatchTask(): Promise<void> {
     return;
   }
   const prompt = await vscode.window.showInputBox({
-    title: "ForgeWire \u00b7 Dispatch \u00b7 prompt",
+    title: "ForgeWire Fabric \u00b7 Dispatch \u00b7 prompt",
     prompt: "Shell command (default executor) or sealed brief",
     ignoreFocusOut: true,
   });

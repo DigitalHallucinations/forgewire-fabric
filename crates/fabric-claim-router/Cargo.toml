@@ -1,0 +1,13 @@
+# fabric-claim-router — capability-aware task selection
+
+[package]
+name = "fabric-claim-router"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+
+[lints]
+workspace = true

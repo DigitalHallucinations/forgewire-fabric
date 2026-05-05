@@ -7,6 +7,9 @@
  * a runtime dependency so the published .vsix stays small.
  */
 
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 import * as vscode from "vscode";
 
 export interface RunnerInfo {
@@ -62,9 +65,9 @@ export class HubClient {
   constructor(private readonly baseUrl: string, private readonly token: string) {}
 
   static fromConfig(): HubClient | undefined {
-    const cfg = vscode.workspace.getConfiguration("forgewire");
+    const cfg = vscode.workspace.getConfiguration("forgewireFabric");
     const baseUrl = (cfg.get<string>("hubUrl") ?? "").trim();
-    const token = (cfg.get<string>("hubToken") ?? "").trim();
+    const token = readToken(cfg);
     if (!baseUrl || !token) {
       return undefined;
     }
@@ -171,4 +174,49 @@ export class HubClient {
       }
     }
   }
+}
+
+function readToken(cfg: vscode.WorkspaceConfiguration): string {
+  const configured = (cfg.get<string>("hubToken") ?? "").trim();
+  if (configured) {
+    return configured;
+  }
+
+  const tokenFile = resolveTokenFile((cfg.get<string>("hubTokenFile") ?? "").trim());
+  if (!tokenFile) {
+    return "";
+  }
+  try {
+    return fs.readFileSync(tokenFile, "utf8").trim();
+  } catch {
+    return "";
+  }
+}
+
+function resolveTokenFile(configured: string): string | undefined {
+  const candidates = [
+    configured,
+    process.env.FORGEWIRE_HUB_TOKEN_FILE ?? "",
+    path.join(os.homedir(), ".forgewire", "hub.token"),
+  ];
+  for (const candidate of candidates) {
+    const resolved = expandHome(candidate.trim());
+    if (resolved && fs.existsSync(resolved)) {
+      return resolved;
+    }
+  }
+  return undefined;
+}
+
+function expandHome(value: string): string {
+  if (!value) {
+    return "";
+  }
+  if (value === "~") {
+    return os.homedir();
+  }
+  if (value.startsWith(`~${path.sep}`) || value.startsWith("~/") || value.startsWith("~\\")) {
+    return path.join(os.homedir(), value.slice(2));
+  }
+  return value;
 }

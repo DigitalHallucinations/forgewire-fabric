@@ -15,8 +15,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from forgewire.dispatcher.identity import DispatcherIdentity, load_or_create
-from forgewire.hub.server import BlackboardConfig, create_app
+from forgewire_fabric.dispatcher.identity import DispatcherIdentity, load_or_create
+from forgewire_fabric.hub.server import BlackboardConfig, create_app
 
 
 HUB_TOKEN = "test-hub-token-aaaaaaaaaaaaaaaaa"

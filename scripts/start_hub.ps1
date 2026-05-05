@@ -3,7 +3,7 @@
     Start the ForgeWire hub on this host (foreground or background).
 
 .DESCRIPTION
-    Thin PowerShell wrapper around ``forgewire hub start``. Ensures a token
+    Thin PowerShell wrapper around ``forgewire-fabric hub start``. Ensures a token
     exists at ``~/.forgewire/hub.token`` (creating a fresh 256-bit hex token
     if missing) and either runs the hub in the foreground (default) or
     detached with logs and a pidfile under ``~/.forgewire/{logs,run}/``.
@@ -12,7 +12,7 @@
 
     For production use install as a service instead, via
     ``scripts/install/nssm-install-hub.ps1`` (Windows), the
-    ``com.forgewire.hub.plist`` launchd job (macOS), or the
+    ``com.forgewire_fabric.hub.plist`` launchd job (macOS), or the
     ``forgewire-hub.service`` systemd unit (Linux).
 
 .PARAMETER BindHost
@@ -62,7 +62,7 @@ function Resolve-ForgeWire {
     $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
     $venv = Join-Path $repoRoot ".venv\Scripts\forgewire.exe"
     if (Test-Path $venv) { return $venv }
-    throw "forgewire CLI not found on PATH and no repo .venv\Scripts\forgewire.exe present. Install with: pip install forgewire"
+    throw "forgewire CLI not found on PATH and no repo .venv\Scripts\forgewire.exe present. Install with: pip install forgewire-fabric"
 }
 
 function Test-PidAlive {

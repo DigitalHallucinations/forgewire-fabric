@@ -7,7 +7,7 @@ medians over 5 runs of N iterations, with the venv warm and the system idle.
 
 ```pwsh
 .\.venv\Scripts\Activate.ps1
-maturin develop --release --manifest-path forgewire-runtime/crates/fw-py/Cargo.toml
+maturin develop --release --manifest-path forgewire-runtime/crates/fabric-py/Cargo.toml
 python -m scripts.remote.bench_crypto
 ```
 

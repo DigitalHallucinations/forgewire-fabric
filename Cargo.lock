@@ -132,20 +132,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "fiat-crypto"
-version = "0.2.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
-
-[[package]]
-name = "fw-claim-router"
+name = "fabric-claim-router"
 version = "0.1.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
-name = "fw-protocol"
+name = "fabric-protocol"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
@@ -156,23 +150,29 @@ dependencies = [
 ]
 
 [[package]]
-name = "fw-py"
+name = "fabric-py"
 version = "0.1.0"
 dependencies = [
- "fw-claim-router",
- "fw-protocol",
- "fw-streams",
+ "fabric-claim-router",
+ "fabric-protocol",
+ "fabric-streams",
  "pyo3",
  "pythonize",
  "serde_json",
 ]
 
 [[package]]
-name = "fw-streams"
+name = "fabric-streams"
 version = "0.1.0"
 dependencies = [
  "parking_lot",
 ]
+
+[[package]]
+name = "fiat-crypto"
+version = "0.2.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 
 [[package]]
 name = "generic-array"

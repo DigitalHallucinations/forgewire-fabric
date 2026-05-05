@@ -40,16 +40,16 @@ PhrenForge
 
 ## Status
 
-✅ **M2.1 shipped — pip-installable.** End-to-end smoke verified: hub + runner + dispatch from `pip install forgewire`. See [`docs/QUICKSTART.md`](docs/QUICKSTART.md) for the 5-minute path. Roadmap in [todo 114-forgewire-fabric](https://github.com/DigitalHallucinations/PhrenForge/tree/main/todos/114-forgewire-fabric).
+✅ **M2.1 shipped — pip-installable.** End-to-end smoke verified: hub + runner + dispatch from `pip install forgewire-fabric`. See [`docs/QUICKSTART.md`](docs/QUICKSTART.md) for the 5-minute path. Roadmap in [todo 114-forgewire-fabric](https://github.com/DigitalHallucinations/PhrenForge/tree/main/todos/114-forgewire-fabric).
 
 | Component | State |
 |-----------|-------|
-| `crates/fw-protocol` | ✅ Stable. Protocol-v2 envelopes (ed25519). |
-| `crates/fw-claim-router` | ✅ Stable. Capability-tag matcher + scope filter. |
-| `crates/fw-streams` | ✅ Stable. In-memory monotonic seq counter. |
-| `crates/fw-py` | ✅ Stable. PyO3 bindings — distributed as `forgewire-runtime`. |
-| `python/forgewire/hub` | ✅ Pure-Python hub server, `forgewire hub start`. |
-| `python/forgewire/runner` | ✅ Standalone claim-loop agent, `forgewire runner start`. |
+| `crates/fabric-protocol` | ✅ Stable. Protocol-v2 envelopes (ed25519). |
+| `crates/fabric-claim-router` | ✅ Stable. Capability-tag matcher + scope filter. |
+| `crates/fabric-streams` | ✅ Stable. In-memory monotonic seq counter. |
+| `crates/fabric-py` | ✅ Stable. PyO3 bindings — distributed as `forgewire-runtime`. |
+| `python/forgewire/hub` | ✅ Pure-Python hub server, `forgewire-fabric hub start`. |
+| `python/forgewire/runner` | ✅ Standalone claim-loop agent, `forgewire-fabric runner start`. |
 | `forgewire` CLI (Click) | ✅ `hub`, `runner`, `dispatch`, `tasks`, `runners`, `keys`, `token`. |
 | `tests/` | ✅ End-to-end + parity tests. |
 | VS Code extension | ✅ Cross-OS GUI in [`vscode/`](vscode). Connect, dispatch, tail streams, start a hub or runner with one command. |
@@ -60,23 +60,23 @@ PhrenForge
 ## Quickstart
 
 ```bash
-pip install forgewire
+pip install forgewire-fabric
 
 # Hub host
 forgewire token gen > hub.token
 export FORGEWIRE_HUB_TOKEN=$(cat hub.token)
-forgewire hub start --host 0.0.0.0 --port 8765
+forgewire-fabric hub start --host 0.0.0.0 --port 8765
 
 # Each runner
 export FORGEWIRE_HUB_URL=http://<hub>:8765 FORGEWIRE_HUB_TOKEN=...
-forgewire runner start --workspace-root /path/to/repo \
+forgewire-fabric runner start --workspace-root /path/to/repo \
     --scope-prefixes "src/,tests/" --tags "linux,python:3.11"
 
 # Dispatch from any machine with the token
-forgewire dispatch "pytest -x" --scope "tests/**" \
+forgewire-fabric dispatch "pytest -x" --scope "tests/**" \
     --branch agent/laptop/smoke --base-commit $(git rev-parse origin/main)
-forgewire tasks list
-forgewire tasks stream <id>
+forgewire-fabric tasks list
+forgewire-fabric tasks stream <id>
 ```
 
 Full guide: [`docs/QUICKSTART.md`](docs/QUICKSTART.md).
@@ -104,10 +104,10 @@ without touching a terminal. See [`vscode/README.md`](vscode/README.md).
 forgewire/
 ├── Cargo.toml                  # Rust workspace
 ├── crates/
-│   ├── fw-protocol/            # Signed-envelope schema + ed25519 verify
-│   ├── fw-claim-router/        # Capability-tag matcher
-│   ├── fw-streams/             # Monotonic stream-seq counter
-│   └── fw-py/                  # PyO3 bindings for the above
+│   ├── fabric-protocol/            # Signed-envelope schema + ed25519 verify
+│   ├── fabric-claim-router/        # Capability-tag matcher
+│   ├── fabric-streams/             # Monotonic stream-seq counter
+│   └── fabric-py/                  # PyO3 bindings for the above
 ├── python/
 │   └── forgewire/
 │       ├── hub/                # FastAPI hub: dispatch, claim, streams, results
@@ -133,7 +133,7 @@ pytest tests/ -q
 ```bash
 cargo test --workspace
 # Or build the Python binding:
-maturin develop --release -m crates/fw-py/pyproject.toml
+maturin develop --release -m crates/fabric-py/pyproject.toml
 ```
 
 The Rust extension (`forgewire-runtime`) is *optional*. The pure-Python hub
@@ -149,7 +149,7 @@ stream counters when running large fleets.
 - **Runner** — long-lived agent registered with capability tags (`tool:browser`, `gpu:nvidia`, `phrenforge:1`, …). Polls for claimable work. Reports streams + a signed result.
 - **Capability tags** — strings on a runner. A dispatch's `required_tags` must all be present on a runner for it to claim.
 - **Scope globs** — path patterns on a dispatch. Restrict what a runner is allowed to read/write inside its workspace.
-- **Stream** — append-only `(task_id, channel, line)` log persisted by the hub. Backed by a monotonic seq counter (`fw-streams`).
+- **Stream** — append-only `(task_id, channel, line)` log persisted by the hub. Backed by a monotonic seq counter (`fabric-streams`).
 - **Result** — terminal envelope for a task: `done | failed | cancelled | timed_out`.
 
 ---

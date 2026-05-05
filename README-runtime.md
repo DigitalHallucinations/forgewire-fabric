@@ -8,16 +8,16 @@ Hot paths migrated to Rust + PyO3, with a Python fallback that ships alongside u
 
 | Crate | Purpose | Status |
 | ----- | ------- | ------ |
-| `fw-protocol` | Wire types + ed25519 sign/verify + canonical JSON envelope | 🚧 Stage C.1 |
-| `fw-claim-router` | Glob set + capability matcher (planned) | 📋 Stage C.2 |
-| `fw-streams` | In-memory ring buffer + flush policy (planned) | 📋 Stage C.3 |
-| `fw-py` | PyO3 bindings; produces `forgewire_runtime` Python extension | 🚧 Stage C.1 |
+| `fabric-protocol` | Wire types + ed25519 sign/verify + canonical JSON envelope | 🚧 Stage C.1 |
+| `fabric-claim-router` | Glob set + capability matcher (planned) | 📋 Stage C.2 |
+| `fabric-streams` | In-memory ring buffer + flush policy (planned) | 📋 Stage C.3 |
+| `fabric-py` | PyO3 bindings; produces `forgewire_runtime` Python extension | 🚧 Stage C.1 |
 
 ## Build
 
 ```pwsh
 # from PhrenForge root, with the venv active
-maturin develop --release --manifest-path forgewire-runtime/crates/fw-py/Cargo.toml
+maturin develop --release --manifest-path forgewire-runtime/crates/fabric-py/Cargo.toml
 python -c "import forgewire_runtime; print(forgewire_runtime.__version__)"
 ```
 

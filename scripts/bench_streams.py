@@ -18,7 +18,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from forgewire.hub._streams import HAS_RUST
+from forgewire_fabric.hub._streams import HAS_RUST
 
 
 def _seed_task(db_path: Path) -> None:
@@ -36,7 +36,7 @@ def _seed_task(db_path: Path) -> None:
 
 
 def bench(n_lines: int = 5_000) -> None:
-    from forgewire.hub.server import Blackboard
+    from forgewire_fabric.hub.server import Blackboard
 
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
         db_path = Path(td) / "bb.sqlite3"

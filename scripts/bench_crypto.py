@@ -18,7 +18,7 @@ from statistics import median
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from forgewire.hub import _crypto
+from forgewire_fabric.hub import _crypto
 
 try:
     import forgewire_runtime as _rust

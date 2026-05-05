@@ -1,9 +1,9 @@
 # Operations: install hub & runner as a service
 
-> Run `forgewire hub start` and `forgewire runner start` as long-lived,
+> Run `forgewire-fabric hub start` and `forgewire-fabric runner start` as long-lived,
 > auto-restarting services on Windows, Linux, and macOS.
 
-This guide assumes you have already run [`pip install forgewire`](../QUICKSTART.md#1-install)
+This guide assumes you have already run [`pip install forgewire-fabric`](../QUICKSTART.md#1-install)
 in a Python environment of your choice and have a hub bearer token saved
 somewhere (the install scripts will pick it up via env var or a token file).
 
@@ -31,7 +31,7 @@ pwsh -File scripts\install\nssm-install-hub.ps1 `
 Result:
 
 - A Windows service named **ForgeWireHub** that runs
-  `python -m forgewire.cli hub start --host 0.0.0.0 --port 8765 --db-path ...`
+  `python -m forgewire_fabric.cli hub start --host 0.0.0.0 --port 8765 --db-path ...`
 - Auto-start on boot, auto-restart on crash (10s back-off, no throttle).
 - Logs at `C:\ProgramData\forgewire\logs\hub.{out,err}.log` with NSSM's
   built-in rotation (10 MB, keep 5 generations).
@@ -108,16 +108,16 @@ restricted system-call filter.
 ## macOS — launchd
 
 ```bash
-sudo cp scripts/install/launchd/com.forgewire.hub.plist /Library/LaunchDaemons/
-sudo chown root:wheel /Library/LaunchDaemons/com.forgewire.hub.plist
-sudo chmod 0644 /Library/LaunchDaemons/com.forgewire.hub.plist
-sudo launchctl load -w /Library/LaunchDaemons/com.forgewire.hub.plist
+sudo cp scripts/install/launchd/com.forgewire_fabric.hub.plist /Library/LaunchDaemons/
+sudo chown root:wheel /Library/LaunchDaemons/com.forgewire_fabric.hub.plist
+sudo chmod 0644 /Library/LaunchDaemons/com.forgewire_fabric.hub.plist
+sudo launchctl load -w /Library/LaunchDaemons/com.forgewire_fabric.hub.plist
 ```
 
 Edit the plist to point at your Python interpreter and to set
 `FORGEWIRE_HUB_TOKEN_FILE`.
 
-For a runner, use `com.forgewire.runner.plist` and set the
+For a runner, use `com.forgewire_fabric.runner.plist` and set the
 `FORGEWIRE_HUB_URL`, `FORGEWIRE_RUNNER_WORKSPACE_ROOT`,
 `FORGEWIRE_RUNNER_TAGS`, and `FORGEWIRE_RUNNER_SCOPE_PREFIXES`
 environment variables in the `<dict>` block.
@@ -147,7 +147,7 @@ works while the hub is serving requests.
 | --- | --- |
 | Windows | `nssm remove ForgeWireHub confirm` (and `ForgeWireRunner`) |
 | Linux | `sudo systemctl disable --now forgewire-hub.service && sudo rm /etc/systemd/system/forgewire-hub.service && sudo systemctl daemon-reload` |
-| macOS | `sudo launchctl unload -w /Library/LaunchDaemons/com.forgewire.hub.plist && sudo rm /Library/LaunchDaemons/com.forgewire.hub.plist` |
+| macOS | `sudo launchctl unload -w /Library/LaunchDaemons/com.forgewire_fabric.hub.plist && sudo rm /Library/LaunchDaemons/com.forgewire_fabric.hub.plist` |
 
 Removing the service does not delete `--db-path`; remove that file
 manually if you want to wipe the task graph.

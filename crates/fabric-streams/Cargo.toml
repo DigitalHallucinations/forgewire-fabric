@@ -1,0 +1,13 @@
+# fabric-streams — per-task stream sequence counters
+
+[package]
+name = "fabric-streams"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+parking_lot = "0.12"
+
+[lints]
+workspace = true

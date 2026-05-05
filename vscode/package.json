@@ -1,10 +1,11 @@
 {
-  "name": "forgewire",
-  "displayName": "ForgeWire",
-  "description": "Dispatch tasks to a ForgeWire compute fabric: signed envelopes, scope-bound capability tokens, live stream output. Run a hub or runner from inside VS Code on Windows, macOS, or Linux.",
+  "name": "forgewire-fabric",
+  "displayName": "ForgeWire Fabric",
+  "description": "Dispatch tasks to a ForgeWire Fabric compute mesh: signed envelopes, scope-bound capability tokens, live stream output. Run a hub or runner from inside VS Code on Windows, macOS, or Linux.",
   "version": "0.1.0",
   "publisher": "DigitalHallucinations",
   "license": "Apache-2.0",
+  "icon": "media/icon.png",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -12,7 +13,7 @@
     "Other"
   ],
   "keywords": [
-    "forgewire",
+    "forgewire-fabric",
     "distributed",
     "cluster",
     "task-dispatch",
@@ -21,12 +22,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/DigitalHallucinations/forgewire.git",
+    "url": "https://github.com/DigitalHallucinations/forgewire-fabric.git",
     "directory": "vscode"
   },
-  "homepage": "https://github.com/DigitalHallucinations/forgewire",
+  "homepage": "https://github.com/DigitalHallucinations/forgewire-fabric",
   "bugs": {
-    "url": "https://github.com/DigitalHallucinations/forgewire/issues"
+    "url": "https://github.com/DigitalHallucinations/forgewire-fabric/issues"
   },
   "main": "./dist/extension.js",
   "activationEvents": [
@@ -34,30 +35,35 @@
   ],
   "contributes": {
     "configuration": {
-      "title": "ForgeWire",
+      "title": "ForgeWire Fabric",
       "properties": {
-        "forgewire.hubUrl": {
+        "forgewireFabric.hubUrl": {
           "type": "string",
           "default": "",
           "description": "Base URL of the ForgeWire hub (e.g. http://hub.local:8765). Leave empty to be prompted on first connect."
         },
-        "forgewire.hubToken": {
+        "forgewireFabric.hubToken": {
           "type": "string",
           "default": "",
           "markdownDescription": "Bearer token for the hub. **Treat as a secret** \u2014 prefer SecretStorage via the *ForgeWire: Set Hub Token* command."
         },
-        "forgewire.pythonPath": {
+        "forgewireFabric.hubTokenFile": {
+          "type": "string",
+          "default": "",
+          "description": "Path to a file containing the hub bearer token. Used when forgewire.hubToken is empty. Defaults to ~/.forgewire/hub.token when present."
+        },
+        "forgewireFabric.pythonPath": {
           "type": "string",
           "default": "",
           "description": "Python interpreter used to install / launch the forgewire CLI. Empty = auto-detect (uses python.defaultInterpreterPath, then 'python3', then 'python')."
         },
-        "forgewire.refreshIntervalSeconds": {
+        "forgewireFabric.refreshIntervalSeconds": {
           "type": "number",
           "default": 10,
           "minimum": 2,
           "description": "How often to refresh the runners and tasks tree views."
         },
-        "forgewire.autoStartHubPort": {
+        "forgewireFabric.autoStartHubPort": {
           "type": "number",
           "default": 8765,
           "description": "Default port used by 'ForgeWire: Start Hub Here'."
@@ -66,154 +72,154 @@
     },
     "commands": [
       {
-        "command": "forgewire.installCli",
-        "title": "Install / Update CLI (pip install forgewire)",
-        "category": "ForgeWire"
+        "command": "forgewireFabric.installCli",
+        "title": "Install / Update CLI (pip install forgewire-fabric)",
+        "category": "ForgeWire Fabric"
       },
       {
-        "command": "forgewire.connectHub",
+        "command": "forgewireFabric.connectHub",
         "title": "Connect to Hub\u2026",
-        "category": "ForgeWire",
+        "category": "ForgeWire Fabric",
         "icon": "$(plug)"
       },
       {
-        "command": "forgewire.setToken",
+        "command": "forgewireFabric.setToken",
         "title": "Set Hub Token\u2026",
-        "category": "ForgeWire"
+        "category": "ForgeWire Fabric"
       },
       {
-        "command": "forgewire.disconnect",
+        "command": "forgewireFabric.disconnect",
         "title": "Disconnect",
-        "category": "ForgeWire"
+        "category": "ForgeWire Fabric"
       },
       {
-        "command": "forgewire.startHubHere",
+        "command": "forgewireFabric.startHubHere",
         "title": "Start Hub Here\u2026",
-        "category": "ForgeWire"
+        "category": "ForgeWire Fabric"
       },
       {
-        "command": "forgewire.startRunnerHere",
+        "command": "forgewireFabric.startRunnerHere",
         "title": "Start Runner Here\u2026",
-        "category": "ForgeWire"
+        "category": "ForgeWire Fabric"
       },
       {
-        "command": "forgewire.dispatchTask",
+        "command": "forgewireFabric.dispatchTask",
         "title": "Dispatch Task\u2026",
-        "category": "ForgeWire",
+        "category": "ForgeWire Fabric",
         "icon": "$(rocket)"
       },
       {
-        "command": "forgewire.refresh",
+        "command": "forgewireFabric.refresh",
         "title": "Refresh",
-        "category": "ForgeWire",
+        "category": "ForgeWire Fabric",
         "icon": "$(refresh)"
       },
       {
-        "command": "forgewire.streamTask",
+        "command": "forgewireFabric.streamTask",
         "title": "Tail Task Stream",
-        "category": "ForgeWire",
+        "category": "ForgeWire Fabric",
         "icon": "$(output)"
       },
       {
-        "command": "forgewire.cancelTask",
+        "command": "forgewireFabric.cancelTask",
         "title": "Cancel Task",
-        "category": "ForgeWire",
+        "category": "ForgeWire Fabric",
         "icon": "$(stop-circle)"
       },
       {
-        "command": "forgewire.showTask",
+        "command": "forgewireFabric.showTask",
         "title": "Show Task",
-        "category": "ForgeWire"
+        "category": "ForgeWire Fabric"
       },
       {
-        "command": "forgewire.copyToken",
+        "command": "forgewireFabric.copyToken",
         "title": "Copy Hub Token to Clipboard",
-        "category": "ForgeWire"
+        "category": "ForgeWire Fabric"
       },
       {
-        "command": "forgewire.generateToken",
+        "command": "forgewireFabric.generateToken",
         "title": "Generate New Hub Token",
-        "category": "ForgeWire"
+        "category": "ForgeWire Fabric"
       }
     ],
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "forgewire",
-          "title": "ForgeWire",
+          "id": "forgewireFabric",
+          "title": "ForgeWire Fabric",
           "icon": "media/sidebar.svg"
         }
       ]
     },
     "views": {
-      "forgewire": [
+    "forgewireFabric": [
         {
-          "id": "forgewire.runners",
+          "id": "forgewireFabric.runners",
           "name": "Runners",
           "icon": "$(server)",
-          "contextualTitle": "ForgeWire Runners"
+          "contextualTitle": "ForgeWire Fabric Runners"
         },
         {
-          "id": "forgewire.tasks",
+          "id": "forgewireFabric.tasks",
           "name": "Tasks",
           "icon": "$(checklist)",
-          "contextualTitle": "ForgeWire Tasks"
+          "contextualTitle": "ForgeWire Fabric Tasks"
         }
       ]
     },
     "viewsWelcome": [
       {
-        "view": "forgewire.runners",
-        "contents": "No hub connection.\n\n[Connect to Hub](command:forgewire.connectHub)\n\n[Start a Hub Locally](command:forgewire.startHubHere)\n\n[Install the CLI](command:forgewire.installCli)\n\nFirst time? Read the [ForgeWire quickstart](https://github.com/DigitalHallucinations/forgewire/blob/main/docs/QUICKSTART.md)."
+        "view": "forgewireFabric.runners",
+        "contents": "No hub connection.\n\n[Connect to Hub](command:forgewireFabric.connectHub)\n\n[Start a Hub Locally](command:forgewireFabric.startHubHere)\n\n[Install the CLI](command:forgewireFabric.installCli)\n\nFirst time? Read the [ForgeWire Fabric quickstart](https://github.com/DigitalHallucinations/forgewire-fabric/blob/main/docs/QUICKSTART.md)."
       },
       {
-        "view": "forgewire.tasks",
-        "contents": "No hub connection.\n\n[Connect to Hub](command:forgewire.connectHub)"
+        "view": "forgewireFabric.tasks",
+        "contents": "No hub connection.\n\n[Connect to Hub](command:forgewireFabric.connectHub)"
       }
     ],
     "menus": {
       "view/title": [
         {
-          "command": "forgewire.refresh",
-          "when": "view == forgewire.runners || view == forgewire.tasks",
+          "command": "forgewireFabric.refresh",
+          "when": "view == forgewireFabric.runners || view == forgewireFabric.tasks",
           "group": "navigation@1"
         },
         {
-          "command": "forgewire.dispatchTask",
-          "when": "view == forgewire.tasks",
+          "command": "forgewireFabric.dispatchTask",
+          "when": "view == forgewireFabric.tasks",
           "group": "navigation@2"
         },
         {
-          "command": "forgewire.connectHub",
-          "when": "view == forgewire.runners",
+          "command": "forgewireFabric.connectHub",
+          "when": "view == forgewireFabric.runners",
           "group": "navigation@2"
         }
       ],
       "view/item/context": [
         {
-          "command": "forgewire.streamTask",
-          "when": "view == forgewire.tasks && viewItem == task",
+          "command": "forgewireFabric.streamTask",
+          "when": "view == forgewireFabric.tasks && viewItem == task",
           "group": "inline@1"
         },
         {
-          "command": "forgewire.cancelTask",
-          "when": "view == forgewire.tasks && viewItem == task",
+          "command": "forgewireFabric.cancelTask",
+          "when": "view == forgewireFabric.tasks && viewItem == task",
           "group": "inline@2"
         },
         {
-          "command": "forgewire.showTask",
-          "when": "view == forgewire.tasks && viewItem == task"
+          "command": "forgewireFabric.showTask",
+          "when": "view == forgewireFabric.tasks && viewItem == task"
         }
       ],
       "commandPalette": [
         {
-          "command": "forgewire.streamTask"
+          "command": "forgewireFabric.streamTask"
         },
         {
-          "command": "forgewire.cancelTask"
+          "command": "forgewireFabric.cancelTask"
         },
         {
-          "command": "forgewire.showTask"
+          "command": "forgewireFabric.showTask"
         }
       ]
     }

@@ -101,7 +101,7 @@ export class TasksProvider extends BaseProvider<TaskInfo> {
         (t.result?.error ? `\n**error:** ${t.result.error}\n` : "")
     );
     item.command = {
-      command: "forgewire.showTask",
+      command: "forgewireFabric.showTask",
       title: "Show Task",
       arguments: [t.id],
     };

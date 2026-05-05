@@ -1,6 +1,6 @@
-# ForgeWire VS Code Extension
+# ForgeWire Fabric VS Code Extension
 
-> Drive a [ForgeWire](https://github.com/DigitalHallucinations/forgewire) compute fabric from inside VS Code. Cross-platform (Windows / macOS / Linux). Apache-2.0.
+> Drive a [ForgeWire](https://github.com/DigitalHallucinations/forgewire-fabric) compute fabric from inside VS Code. Cross-platform (Windows / macOS / Linux). Apache-2.0.
 
 ForgeWire turns any cluster of machines into a signed, scope-bounded task fabric. This extension is the GUI for it: connect to a hub, watch runners and tasks live, dispatch sealed briefs, and tail per-task stream output — all without leaving the editor. It can also start a hub or a runner locally with two clicks, so any computer running VS Code can join a cluster regardless of OS.
 
@@ -11,9 +11,9 @@ ForgeWire turns any cluster of machines into a signed, scope-bounded task fabric
   - **Tasks**: recent dispatches with status icons, branch, and per-task actions (tail stream, cancel, show JSON).
 - **Status bar item** showing the active hub host. Click to (re)connect.
 - **Dispatch quick-pick**: prompt → scope globs → branch → base-commit → sent. The hub's terminal status is reported back; the extension can immediately start tailing the SSE stream into an output channel.
-- **Local hub control**: *ForgeWire: Start Hub Here* runs `forgewire hub start` in a managed terminal with a freshly generated token (saved to VS Code SecretStorage).
+- **Local hub control**: *ForgeWire: Start Hub Here* runs `forgewire-fabric hub start` in a managed terminal with a freshly generated token (saved to VS Code SecretStorage).
 - **Local runner control**: *ForgeWire: Start Runner Here* registers the current machine as a runner against the connected hub. Workspace root, tags, and scope prefixes are prompted with sensible defaults from the open folder.
-- **CLI bootstrap**: *ForgeWire: Install / Update CLI* runs `pip install --upgrade forgewire` in your selected Python interpreter — no terminal commands required.
+- **CLI bootstrap**: *ForgeWire: Install / Update CLI* runs `pip install --upgrade forgewire-fabric` in your selected Python interpreter — no terminal commands required.
 - **Token utilities**: generate cryptographically-random hub tokens; copy the active token to clipboard.
 - **Auto-refresh**: runners and tasks views poll every N seconds (configurable, default 10s).
 
@@ -53,6 +53,7 @@ That's it — the runner is online and the hub will route matching tasks to it.
 | --- | --- | --- |
 | `forgewire.hubUrl` | `""` | Base URL of the hub. |
 | `forgewire.hubToken` | `""` | Bearer token. Prefer the *Set Hub Token* command (uses SecretStorage). |
+| `forgewire.hubTokenFile` | `""` | File containing the bearer token. Used when `hubToken` is empty; falls back to `~/.forgewire/hub.token` if present. |
 | `forgewire.pythonPath` | `""` | Python interpreter used for `pip install` / local hub / local runner. Empty = auto-detect. |
 | `forgewire.refreshIntervalSeconds` | `10` | Tree-view refresh cadence. |
 | `forgewire.autoStartHubPort` | `8765` | Default port for *Start Hub Here*. |
@@ -83,4 +84,4 @@ All commands are under the **ForgeWire** category in the command palette:
 
 ## Reporting issues
 
-Please file issues at <https://github.com/DigitalHallucinations/forgewire/issues>. Include the extension version, VS Code version, and the OS of the failing machine.
+Please file issues at <https://github.com/DigitalHallucinations/forgewire-fabric/issues>. Include the extension version, VS Code version, and the OS of the failing machine.

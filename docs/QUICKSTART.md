@@ -19,7 +19,7 @@ reach the hub.
 On every machine that will be a hub, runner, or dispatcher:
 
 ```bash
-pip install forgewire
+pip install forgewire-fabric
 ```
 
 (Optional) for LAN auto-discovery, install the `mdns` extra:
@@ -60,13 +60,13 @@ this token can issue tasks to your cluster.**
 ```powershell
 # Windows
 $env:FORGEWIRE_HUB_TOKEN = (Get-Content hub.token).Trim()
-forgewire hub start --host 0.0.0.0 --port 8765
+forgewire-fabric hub start --host 0.0.0.0 --port 8765
 ```
 
 ```bash
 # Linux / macOS
 export FORGEWIRE_HUB_TOKEN=$(cat hub.token)
-forgewire hub start --host 0.0.0.0 --port 8765
+forgewire-fabric hub start --host 0.0.0.0 --port 8765
 ```
 
 Verify from another shell:
@@ -74,7 +74,7 @@ Verify from another shell:
 ```bash
 export FORGEWIRE_HUB_URL=http://<hub-host>:8765
 export FORGEWIRE_HUB_TOKEN=$(cat hub.token)
-forgewire hub healthz
+forgewire-fabric hub healthz
 # → {"status":"ok","protocol_version":2,...}
 ```
 
@@ -92,7 +92,7 @@ On every worker machine, set the same env vars and start the runner:
 export FORGEWIRE_HUB_URL=http://<hub-host>:8765
 export FORGEWIRE_HUB_TOKEN=$(cat hub.token)
 
-forgewire runner start \
+forgewire-fabric runner start \
   --workspace-root /path/to/your/repo \
   --scope-prefixes "src/,tests/" \
   --tags "linux,gpu:nvidia,python:3.11"
@@ -111,7 +111,7 @@ ask for `infra/**` are invisible to a runner that only declared
 Confirm registration from anywhere:
 
 ```bash
-forgewire runners list
+forgewire-fabric runners list
 ```
 
 ---
@@ -121,7 +121,7 @@ forgewire runners list
 From any machine with the token (your laptop is fine):
 
 ```bash
-forgewire dispatch "pytest tests/smoke -x" \
+forgewire-fabric dispatch "pytest tests/smoke -x" \
   --scope "tests/smoke/**" \
   --branch "agent/laptop/smoke-1" \
   --base-commit $(git rev-parse origin/main)
@@ -130,14 +130,14 @@ forgewire dispatch "pytest tests/smoke -x" \
 Watch it run:
 
 ```bash
-forgewire tasks list                # see queued/running/done
-forgewire tasks show 1              # full envelope incl. result
-forgewire tasks stream 1            # tail SSE: stdout/stderr line by line
+forgewire-fabric tasks list                # see queued/running/done
+forgewire-fabric tasks show 1              # full envelope incl. result
+forgewire-fabric tasks stream 1            # tail SSE: stdout/stderr line by line
 ```
 
 The default executor runs the prompt as a shell command in the runner's
 `--workspace-root`. Custom executors (e.g. driving an orchestrator) plug in
-via `forgewire.runner.run_runner(executor=...)`.
+via `forgewire_fabric.runner.run_runner(executor=...)`.
 
 ---
 
@@ -196,7 +196,7 @@ settings reference.
 | `FORGEWIRE_HUB_TOKEN` | Bearer token shared with the hub. |
 | `FORGEWIRE_HUB_TOKEN_FILE` | Path to a file containing the token (alternative to `_TOKEN`). |
 | `FORGEWIRE_HUB_DISCOVER` | If `1`, browse mDNS for a hub when `_URL` is unset (requires `mdns` extra). |
-| `FORGEWIRE_HUB_HOST` / `FORGEWIRE_HUB_PORT` | Default bind for `forgewire hub start`. |
+| `FORGEWIRE_HUB_HOST` / `FORGEWIRE_HUB_PORT` | Default bind for `forgewire-fabric hub start`. |
 | `FORGEWIRE_HUB_DB_PATH` | SQLite path for the hub's task graph (default `~/.forgewire/hub.sqlite3`). |
 | `FORGEWIRE_RUNNER_WORKSPACE_ROOT` | Working tree for the runner. |
 | `FORGEWIRE_RUNNER_TAGS` | Comma-separated runner capability tags. |
@@ -222,7 +222,7 @@ forgewire keys init-dispatcher --label "$(hostname)"
 ```
 
 This writes `~/.forgewire/dispatcher_identity.json` (mode 0o600 on POSIX). The
-first `forgewire dispatch` call after this auto-registers the public key with
+first `forgewire-fabric dispatch` call after this auto-registers the public key with
 the hub; subsequent dispatches sign the immutable fields of the envelope
 (`op`, `dispatcher_id`, `title`, `prompt`, `scope_globs`, `base_commit`,
 `branch`, `timestamp`, `nonce`) and include the signature.
@@ -232,9 +232,9 @@ the hub; subsequent dispatches sign the immutable fields of the envelope
 To reject unsigned dispatches entirely, start the hub with:
 
 ```bash
-forgewire hub start --require-signed-dispatch
+forgewire-fabric hub start --require-signed-dispatch
 # or
-FORGEWIRE_HUB_REQUIRE_SIGNED_DISPATCH=1 forgewire hub start
+FORGEWIRE_HUB_REQUIRE_SIGNED_DISPATCH=1 forgewire-fabric hub start
 ```
 
 When this flag is on, `POST /tasks` returns `426 Upgrade Required` and

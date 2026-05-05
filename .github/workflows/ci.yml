@@ -35,7 +35,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install maturin pytest pytest-asyncio fastapi httpx uvicorn pydantic pynacl
       - name: Build PyO3 extension
-        run: maturin develop --release -m crates/fw-py/Cargo.toml
+        run: maturin develop --release -m crates/fabric-py/Cargo.toml
       - name: Run tests
         env:
           PYTHONPATH: python
