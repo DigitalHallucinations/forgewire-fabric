@@ -56,6 +56,18 @@ def _new_token() -> str:
     return secrets.token_hex(16)
 
 
+def _powershell_env() -> dict[str, str]:
+    """Return an env dict suitable for invoking powershell.exe.
+
+    Strips ``PSModulePath`` so a caller's mangled module path (e.g. from a
+    venv ``Activate.ps1``) cannot prevent ``Microsoft.PowerShell.Security``
+    from loading inside the installer script.
+    """
+    env = os.environ.copy()
+    env.pop("PSModulePath", None)
+    return env
+
+
 # ---------------------------------------------------------------------------
 # Windows (NSSM)
 # ---------------------------------------------------------------------------
@@ -84,7 +96,7 @@ def _windows_install_hub(*, port: int, host: str, token: str | None) -> None:
         "-BindHost",
         host,
     ]
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, check=True, env=_powershell_env())
 
 
 def _windows_install_runner(*, hub_url: str, hub_token: str, workspace_root: str) -> None:
@@ -107,7 +119,7 @@ def _windows_install_runner(*, hub_url: str, hub_token: str, workspace_root: str
         "-WorkspaceRoot",
         workspace_root,
     ]
-    subprocess.run(cmd, check=True)
+    subprocess.run(cmd, check=True, env=_powershell_env())
 
 
 def _windows_uninstall(service: str) -> None:

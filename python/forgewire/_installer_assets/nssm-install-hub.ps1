@@ -43,15 +43,16 @@ New-Item -ItemType Directory -Force -Path $DataDir, $LogDir, (Split-Path $DbPath
 
 # Write token with restrictive ACL (owner + SYSTEM + Administrators only).
 [System.IO.File]::WriteAllText($TokenFile, $Token.Trim())
-$acl = Get-Acl $TokenFile
+$fileInfo = [System.IO.FileInfo]::new($TokenFile)
+$acl = $fileInfo.GetAccessControl()
 $acl.SetAccessRuleProtection($true, $false)
-$acl.Access | ForEach-Object { $acl.RemoveAccessRule($_) | Out-Null }
+foreach ($rule in @($acl.Access)) { [void]$acl.RemoveAccessRule($rule) }
 foreach ($principal in @("NT AUTHORITY\SYSTEM", "BUILTIN\Administrators")) {
     $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
         $principal, "FullControl", "Allow")
     $acl.AddAccessRule($rule)
 }
-Set-Acl -Path $TokenFile -AclObject $acl
+$fileInfo.SetAccessControl($acl)
 
 $prevPref = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
