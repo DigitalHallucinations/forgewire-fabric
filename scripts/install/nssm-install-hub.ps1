@@ -112,25 +112,37 @@ $cliArgs = @(
 
 # ---- Start + resume (idempotent) -----------------------------------------
 # `nssm continue` is a no-op when the service is not paused; `nssm start` is
-# a no-op when it is already running. Belt + braces handles every leftover
-# state the previous rename runs left behind.
-& nssm.exe continue $ServiceName *>$null
-& nssm.exe start    $ServiceName *>$null
-Start-Sleep -Seconds 2
-$status = (& nssm.exe status $ServiceName | Out-String).Trim()
-if ($status -eq "SERVICE_PAUSED") {
-    Write-Warning "Service was paused; resuming."
-    & nssm.exe continue $ServiceName *>$null
-    Start-Sleep -Seconds 1
-    $status = (& nssm.exe status $ServiceName | Out-String).Trim()
-}
-if ($status -ne "SERVICE_RUNNING") {
-    & nssm.exe start $ServiceName *>$null
+# ---- Start + resume (idempotent) -----------------------------------------
+# In PowerShell 7+ native non-zero exit codes raise a terminating error when
+# $PSNativeCommandUseErrorActionPreference is on (the default). Disable that
+# locally so we can poll nssm without aborting on benign exit codes (e.g.
+# 'continue' against a service that has not started yet).
+$prevNative = $PSNativeCommandUseErrorActionPreference
+$PSNativeCommandUseErrorActionPreference = $false
+try {
+    function Get-NssmStatus {
+        return (& nssm.exe status $ServiceName 2>&1 | Out-String).Trim()
+    }
+
+    $status = Get-NssmStatus
+    switch -Regex ($status) {
+        'SERVICE_PAUSED'  { & nssm.exe continue $ServiceName 2>&1 | Out-Null }
+        'SERVICE_STOPPED' { & nssm.exe start    $ServiceName 2>&1 | Out-Null }
+        'SERVICE_RUNNING' { } # already running, no-op
+        default           { & nssm.exe start    $ServiceName 2>&1 | Out-Null }
+    }
     Start-Sleep -Seconds 2
-    $status = (& nssm.exe status $ServiceName | Out-String).Trim()
-}
-if ($status -ne "SERVICE_RUNNING") {
-    throw "Service '$ServiceName' is in unexpected state: '$status'. Check logs in $LogDir."
+    $status = Get-NssmStatus
+    if ($status -eq 'SERVICE_PAUSED') {
+        & nssm.exe continue $ServiceName 2>&1 | Out-Null
+        Start-Sleep -Seconds 1
+        $status = Get-NssmStatus
+    }
+    if ($status -ne 'SERVICE_RUNNING') {
+        throw "Service '$ServiceName' is in unexpected state: '$status'. Check logs in $LogDir."
+    }
+} finally {
+    $PSNativeCommandUseErrorActionPreference = $prevNative
 }
 Write-Host "Service status: $status"
 Write-Host ""
