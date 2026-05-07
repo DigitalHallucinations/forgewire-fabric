@@ -30,6 +30,25 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# ---- Self-elevation -------------------------------------------------------
+# If we are not running with the Administrator token, relaunch ourselves
+# elevated (UAC prompt) and wait for completion. This means a non-admin user
+# can run the installer directly without remembering to open an admin shell.
+$identity  = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = [System.Security.Principal.WindowsPrincipal]::new($identity)
+if (-not $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    $shellExe = (Get-Process -Id $PID).Path  # whichever pwsh/powershell launched us
+    $forwarded = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath)
+    foreach ($k in $PSBoundParameters.Keys) {
+        $v = $PSBoundParameters[$k]
+        if ($v -is [switch]) { if ($v.IsPresent) { $forwarded += "-$k" } }
+        else                 { $forwarded += "-$k"; $forwarded += $v }
+    }
+    Write-Host "Elevating: $shellExe $($forwarded -join ' ')"
+    $proc = Start-Process -FilePath $shellExe -Verb RunAs -Wait -PassThru -ArgumentList $forwarded
+    exit $proc.ExitCode
+}
+
 if (-not (Get-Command nssm.exe -ErrorAction SilentlyContinue)) {
     throw "nssm.exe not found on PATH. Install from https://nssm.cc/ or via 'winget install nssm.nssm'."
 }
@@ -91,9 +110,28 @@ $cliArgs = @(
     "FORGEWIRE_HUB_TOKEN_FILE=$TokenFile" `
     "PYTHONUNBUFFERED=1" | Out-Null
 
-& nssm.exe start $ServiceName | Out-Null
+# ---- Start + resume (idempotent) -----------------------------------------
+# `nssm continue` is a no-op when the service is not paused; `nssm start` is
+# a no-op when it is already running. Belt + braces handles every leftover
+# state the previous rename runs left behind.
+& nssm.exe continue $ServiceName *>$null
+& nssm.exe start    $ServiceName *>$null
 Start-Sleep -Seconds 2
-$status = & nssm.exe status $ServiceName
+$status = (& nssm.exe status $ServiceName | Out-String).Trim()
+if ($status -eq "SERVICE_PAUSED") {
+    Write-Warning "Service was paused; resuming."
+    & nssm.exe continue $ServiceName *>$null
+    Start-Sleep -Seconds 1
+    $status = (& nssm.exe status $ServiceName | Out-String).Trim()
+}
+if ($status -ne "SERVICE_RUNNING") {
+    & nssm.exe start $ServiceName *>$null
+    Start-Sleep -Seconds 2
+    $status = (& nssm.exe status $ServiceName | Out-String).Trim()
+}
+if ($status -ne "SERVICE_RUNNING") {
+    throw "Service '$ServiceName' is in unexpected state: '$status'. Check logs in $LogDir."
+}
 Write-Host "Service status: $status"
 Write-Host ""
 Write-Host "Hub URL:    http://${env:COMPUTERNAME}:${Port}"
