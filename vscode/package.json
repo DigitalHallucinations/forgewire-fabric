@@ -2,7 +2,7 @@
   "name": "forgewire-fabric",
   "displayName": "ForgeWire Fabric",
   "description": "Dispatch tasks to a ForgeWire Fabric compute mesh: signed envelopes, scope-bound capability tokens, live stream output. Run a hub or runner from inside VS Code on Windows, macOS, or Linux.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "DigitalHallucinations",
   "license": "Apache-2.0",
   "icon": "media/icon.png",
@@ -140,6 +140,12 @@
         "command": "forgewireFabric.generateToken",
         "title": "Generate New Hub Token",
         "category": "ForgeWire Fabric"
+      },
+      {
+        "command": "forgewireFabric.openSettings",
+        "title": "Open Settings…",
+        "category": "ForgeWire Fabric",
+        "icon": "$(gear)"
       }
     ],
     "viewsContainers": {
@@ -153,6 +159,12 @@
     },
     "views": {
     "forgewireFabric": [
+        {
+          "id": "forgewireFabric.hub",
+          "name": "Hub",
+          "icon": "$(plug)",
+          "contextualTitle": "ForgeWire Fabric Hub"
+        },
         {
           "id": "forgewireFabric.runners",
           "name": "Runners",
@@ -169,6 +181,10 @@
     },
     "viewsWelcome": [
       {
+        "view": "forgewireFabric.hub",
+        "contents": "No hub connection.\n\n[Connect to Hub](command:forgewireFabric.connectHub)\n\n[Open Settings](command:forgewireFabric.openSettings)\n\n[Start a Hub Locally](command:forgewireFabric.startHubHere)"
+      },
+      {
         "view": "forgewireFabric.runners",
         "contents": "No hub connection.\n\n[Connect to Hub](command:forgewireFabric.connectHub)\n\n[Start a Hub Locally](command:forgewireFabric.startHubHere)\n\n[Install the CLI](command:forgewireFabric.installCli)\n\nFirst time? Read the [ForgeWire Fabric quickstart](https://github.com/DigitalHallucinations/forgewire-fabric/blob/main/docs/QUICKSTART.md)."
       },
@@ -181,8 +197,13 @@
       "view/title": [
         {
           "command": "forgewireFabric.refresh",
-          "when": "view == forgewireFabric.runners || view == forgewireFabric.tasks",
+          "when": "view == forgewireFabric.runners || view == forgewireFabric.tasks || view == forgewireFabric.hub",
           "group": "navigation@1"
+        },
+        {
+          "command": "forgewireFabric.openSettings",
+          "when": "view == forgewireFabric.hub",
+          "group": "navigation@2"
         },
         {
           "command": "forgewireFabric.dispatchTask",

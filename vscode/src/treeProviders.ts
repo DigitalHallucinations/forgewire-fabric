@@ -17,6 +17,147 @@ abstract class BaseProvider<T> implements vscode.TreeDataProvider<T> {
 }
 
 // ---------------------------------------------------------------------------
+// Hub
+// ---------------------------------------------------------------------------
+
+export interface HubNode {
+  key: string;
+  label: string;
+  description?: string;
+  icon?: string;
+  tooltip?: string;
+  command?: vscode.Command;
+}
+
+export class HubProvider implements vscode.TreeDataProvider<HubNode> {
+  private readonly _onDidChange = new vscode.EventEmitter<HubNode | undefined | void>();
+  readonly onDidChangeTreeData = this._onDidChange.event;
+
+  private cached: HubNode[] = [];
+
+  constructor(private readonly client: () => HubClient | undefined) {}
+
+  refresh(): void {
+    this._onDidChange.fire();
+  }
+
+  async getChildren(element?: HubNode): Promise<HubNode[]> {
+    if (element) {
+      return [];
+    }
+    const c = this.client();
+    if (!c) {
+      this.cached = [
+        {
+          key: "state",
+          label: "Not connected",
+          icon: "debug-disconnect",
+          description: "click to connect",
+          command: {
+            command: "forgewireFabric.connectHub",
+            title: "Connect to Hub",
+          },
+        },
+        {
+          key: "settings",
+          label: "Open Settings\u2026",
+          icon: "gear",
+          command: {
+            command: "forgewireFabric.openSettings",
+            title: "Open Settings",
+          },
+        },
+      ];
+      return this.cached;
+    }
+
+    const nodes: HubNode[] = [
+      {
+        key: "url",
+        label: "URL",
+        description: c.url,
+        icon: "link",
+        tooltip: c.url,
+      },
+    ];
+
+    try {
+      const h = await c.healthz();
+      const runners = await c.listRunners().catch(() => [] as RunnerInfo[]);
+      const online = runners.filter((r) => r.state === "online").length;
+      nodes.push(
+        {
+          key: "status",
+          label: "Status",
+          description: h.status,
+          icon: h.status === "ok" ? "pass-filled" : "warning",
+        },
+        {
+          key: "version",
+          label: "Hub version",
+          description: h.version,
+          icon: "tag",
+        },
+        {
+          key: "protocol",
+          label: "Protocol",
+          description: `v${h.protocol_version}`,
+          icon: "versions",
+        },
+        {
+          key: "runners",
+          label: "Runners",
+          description: `${online} online / ${runners.length} total`,
+          icon: "server-environment",
+          command: {
+            command: "forgewireFabric.refresh",
+            title: "Refresh",
+          },
+        }
+      );
+    } catch (err) {
+      nodes.push({
+        key: "status",
+        label: "Status",
+        description: "unreachable",
+        icon: "error",
+        tooltip: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    nodes.push({
+      key: "settings",
+      label: "Settings\u2026",
+      icon: "gear",
+      command: {
+        command: "forgewireFabric.openSettings",
+        title: "Open Settings",
+      },
+    });
+
+    this.cached = nodes;
+    return nodes;
+  }
+
+  getTreeItem(n: HubNode): vscode.TreeItem {
+    const item = new vscode.TreeItem(n.label, vscode.TreeItemCollapsibleState.None);
+    item.id = `hub:${n.key}`;
+    item.description = n.description;
+    if (n.icon) {
+      item.iconPath = new vscode.ThemeIcon(n.icon);
+    }
+    if (n.tooltip) {
+      item.tooltip = n.tooltip;
+    }
+    if (n.command) {
+      item.command = n.command;
+    }
+    item.contextValue = `hub.${n.key}`;
+    return item;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Runners
 // ---------------------------------------------------------------------------
 

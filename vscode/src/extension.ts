@@ -10,12 +10,13 @@ import * as os from "os";
 import * as path from "path";
 import * as vscode from "vscode";
 import { HubClient } from "./hubClient";
-import { RunnersProvider, TasksProvider } from "./treeProviders";
+import { HubProvider, RunnersProvider, TasksProvider } from "./treeProviders";
 
 const SECRET_TOKEN_KEY = "forgewireFabric.hubToken";
 
 let outputChannel: vscode.OutputChannel;
 let statusItem: vscode.StatusBarItem;
+let hubProvider: HubProvider;
 let runnersProvider: RunnersProvider;
 let tasksProvider: TasksProvider;
 let refreshTimer: NodeJS.Timeout | undefined;
@@ -38,9 +39,11 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<void> {
   // Hydrate token from SecretStorage into the live HubClient lookup.
   await hydrateTokenFromSecret();
 
+  hubProvider = new HubProvider(getClient);
   runnersProvider = new RunnersProvider(getClient);
   tasksProvider = new TasksProvider(getClient);
   ctx.subscriptions.push(
+    vscode.window.registerTreeDataProvider("forgewireFabric.hub", hubProvider),
     vscode.window.registerTreeDataProvider("forgewireFabric.runners", runnersProvider),
     vscode.window.registerTreeDataProvider("forgewireFabric.tasks", tasksProvider)
   );
@@ -58,7 +61,8 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<void> {
     vscode.commands.registerCommand("forgewireFabric.cancelTask", cancelTaskCmd),
     vscode.commands.registerCommand("forgewireFabric.showTask", showTaskCmd),
     vscode.commands.registerCommand("forgewireFabric.copyToken", copyToken),
-    vscode.commands.registerCommand("forgewireFabric.generateToken", generateToken)
+    vscode.commands.registerCommand("forgewireFabric.generateToken", generateToken),
+    vscode.commands.registerCommand("forgewireFabric.openSettings", openSettings)
   );
 
   ctx.subscriptions.push(
@@ -122,6 +126,7 @@ function scheduleRefresh(): void {
 }
 
 function refreshAll(): void {
+  hubProvider?.refresh();
   runnersProvider?.refresh();
   tasksProvider?.refresh();
 }
@@ -553,3 +558,268 @@ async function showTaskCmd(arg: number | { id: number }): Promise<void> {
     );
   }
 }
+
+// ---------------------------------------------------------------------------
+// commands: settings panel (role / hub url / token / port / workspace)
+// ---------------------------------------------------------------------------
+
+let settingsPanel: vscode.WebviewPanel | undefined;
+
+async function openSettings(): Promise<void> {
+  if (settingsPanel) {
+    settingsPanel.reveal(vscode.ViewColumn.Active);
+    return;
+  }
+  const panel = vscode.window.createWebviewPanel(
+    "forgewireFabric.settings",
+    "ForgeWire Fabric Settings",
+    vscode.ViewColumn.Active,
+    { enableScripts: true, retainContextWhenHidden: true }
+  );
+  settingsPanel = panel;
+  panel.onDidDispose(() => {
+    settingsPanel = undefined;
+  });
+
+  const cfg = vscode.workspace.getConfiguration("forgewireFabric");
+  const wsRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir();
+  const initial = {
+    hubUrl: cfg.get<string>("hubUrl") ?? "",
+    hubToken: cfg.get<string>("hubToken") ?? "",
+    hubTokenFile: cfg.get<string>("hubTokenFile") ?? "",
+    pythonPath: cfg.get<string>("pythonPath") ?? "",
+    refreshIntervalSeconds: cfg.get<number>("refreshIntervalSeconds") ?? 10,
+    autoStartHubPort: cfg.get<number>("autoStartHubPort") ?? 8765,
+    workspaceRoot: wsRoot,
+  };
+
+  panel.webview.html = settingsHtml(initial);
+
+  panel.webview.onDidReceiveMessage(async (msg) => {
+    try {
+      if (msg?.type === "save") {
+        const c = vscode.workspace.getConfiguration("forgewireFabric");
+        await c.update("hubUrl", String(msg.hubUrl ?? "").trim(), vscode.ConfigurationTarget.Global);
+        await c.update("hubTokenFile", String(msg.hubTokenFile ?? "").trim(), vscode.ConfigurationTarget.Global);
+        await c.update("pythonPath", String(msg.pythonPath ?? "").trim(), vscode.ConfigurationTarget.Global);
+        await c.update("refreshIntervalSeconds", Number(msg.refreshIntervalSeconds) || 10, vscode.ConfigurationTarget.Global);
+        await c.update("autoStartHubPort", Number(msg.autoStartHubPort) || 8765, vscode.ConfigurationTarget.Global);
+        const tok = String(msg.hubToken ?? "").trim();
+        if (tok) {
+          await c.update("hubToken", tok, vscode.ConfigurationTarget.Global);
+          await context.secrets.store(SECRET_TOKEN_KEY, tok);
+        }
+        vscode.window.showInformationMessage("ForgeWire Fabric: settings saved.");
+        updateStatus();
+        scheduleRefresh();
+        refreshAll();
+      } else if (msg?.type === "test") {
+        const c = HubClient.fromConfig();
+        if (!c) {
+          panel.webview.postMessage({ type: "testResult", ok: false, error: "no hub configured" });
+          return;
+        }
+        try {
+          const h = await c.healthz();
+          panel.webview.postMessage({
+            type: "testResult",
+            ok: true,
+            url: c.url,
+            status: h.status,
+            version: h.version,
+            protocol: h.protocol_version,
+          });
+        } catch (err) {
+          panel.webview.postMessage({
+            type: "testResult",
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      } else if (msg?.type === "applySetup") {
+        const role = String(msg.role ?? "runner");
+        const wsr = String(msg.workspaceRoot ?? "").trim() || (vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir());
+        const url = String(msg.hubUrl ?? "").trim();
+        const tok = String(msg.hubToken ?? "").trim();
+        const port = Number(msg.autoStartHubPort) || 8765;
+        const parts = [
+          `${pythonCommand()} -m forgewire_fabric.cli setup`,
+          `--role ${role}`,
+          `--port ${port}`,
+          `--workspace-root "${wsr}"`,
+        ];
+        if (url) {
+          parts.push(`--hub-url "${url}"`);
+        }
+        if (tok) {
+          parts.push(`--hub-token "${tok}"`);
+        }
+        const term = getOrCreateTerminal("ForgeWire Fabric: setup");
+        term.show();
+        term.sendText(parts.join(" "));
+        vscode.window.showInformationMessage(
+          "ForgeWire Fabric: running 'setup' in terminal. Watch for the UAC prompt on Windows."
+        );
+      } else if (msg?.type === "generateToken") {
+        const bytes = new Uint8Array(16);
+        crypto.getRandomValues(bytes);
+        const tok = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+        panel.webview.postMessage({ type: "generatedToken", token: tok });
+      }
+    } catch (err) {
+      vscode.window.showErrorMessage(
+        `Settings action failed: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
+  });
+}
+
+function settingsHtml(init: Record<string, unknown>): string {
+  const json = JSON.stringify(init).replace(/</g, "\\u003c");
+  return `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<style>
+  body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); padding: 16px; max-width: 720px; }
+  h1 { font-size: 1.4em; margin-top: 0; }
+  h2 { font-size: 1.05em; margin-top: 24px; border-bottom: 1px solid var(--vscode-panel-border); padding-bottom: 4px; }
+  label { display: block; margin: 12px 0 4px; font-weight: 600; }
+  .hint { font-size: 0.85em; color: var(--vscode-descriptionForeground); margin-bottom: 4px; }
+  input[type=text], input[type=password], input[type=number], select {
+    width: 100%; padding: 6px 8px;
+    background: var(--vscode-input-background);
+    color: var(--vscode-input-foreground);
+    border: 1px solid var(--vscode-input-border, transparent);
+    border-radius: 2px;
+    box-sizing: border-box;
+  }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; }
+  button {
+    margin-top: 12px; padding: 6px 14px;
+    background: var(--vscode-button-background);
+    color: var(--vscode-button-foreground);
+    border: none; border-radius: 2px; cursor: pointer;
+  }
+  button.secondary {
+    background: var(--vscode-button-secondaryBackground);
+    color: var(--vscode-button-secondaryForeground);
+  }
+  button:hover { background: var(--vscode-button-hoverBackground); }
+  .actions { margin-top: 20px; display: flex; gap: 8px; flex-wrap: wrap; }
+  #result { margin-top: 12px; padding: 8px; border-radius: 2px; white-space: pre-wrap; font-family: var(--vscode-editor-font-family); display: none; }
+  #result.ok { background: var(--vscode-testing-iconPassed, #387a3833); }
+  #result.err { background: var(--vscode-testing-iconFailed, #aa000033); }
+  fieldset { border: 1px solid var(--vscode-panel-border); border-radius: 2px; padding: 8px 12px; }
+  fieldset legend { padding: 0 6px; font-weight: 600; }
+  .role-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  .role-grid label { font-weight: 400; display: flex; align-items: center; gap: 6px; margin: 0; }
+</style>
+</head>
+<body>
+<h1>ForgeWire Fabric Settings</h1>
+<p class="hint">These settings are saved to your VS Code user settings. The token is also written to SecretStorage when you click <strong>Save</strong>.</p>
+
+<h2>Connection</h2>
+<label for="hubUrl">Hub URL</label>
+<div class="hint">e.g. <code>http://10.120.81.95:8765</code></div>
+<input type="text" id="hubUrl" />
+
+<label for="hubToken">Hub token</label>
+<div class="hint">32+ hex chars. Saved to SecretStorage. Leave blank to keep the existing one or to read from a token file.</div>
+<div class="row">
+  <input type="password" id="hubToken" placeholder="(unchanged)" />
+  <button class="secondary" id="genBtn" type="button">Generate</button>
+</div>
+
+<label for="hubTokenFile">Token file (optional)</label>
+<div class="hint">Path read when the token field is empty. Default: <code>~/.forgewire/hub.token</code>.</div>
+<input type="text" id="hubTokenFile" />
+
+<h2>Install / role (one-shot setup)</h2>
+<p class="hint">Drives <code>forgewire-fabric setup</code> in a terminal. On Windows the installer self-elevates (UAC).</p>
+<fieldset>
+  <legend>Role</legend>
+  <div class="role-grid">
+    <label><input type="radio" name="role" value="hub" /> Hub only</label>
+    <label><input type="radio" name="role" value="runner" checked /> Runner only</label>
+    <label><input type="radio" name="role" value="hub-and-runner" /> Hub + Runner</label>
+  </div>
+</fieldset>
+
+<label for="workspaceRoot">Runner workspace root</label>
+<input type="text" id="workspaceRoot" />
+
+<label for="autoStartHubPort">Hub port</label>
+<input type="number" id="autoStartHubPort" min="1" max="65535" />
+
+<h2>Other</h2>
+<label for="pythonPath">Python interpreter (optional)</label>
+<div class="hint">Empty = auto-detect (uses python.defaultInterpreterPath, then python3, then python).</div>
+<input type="text" id="pythonPath" />
+
+<label for="refreshIntervalSeconds">Refresh interval (seconds)</label>
+<input type="number" id="refreshIntervalSeconds" min="2" max="600" />
+
+<div class="actions">
+  <button id="saveBtn" type="button">Save settings</button>
+  <button id="testBtn" class="secondary" type="button">Test connection</button>
+  <button id="applyBtn" type="button">Run setup\u2026</button>
+</div>
+
+<div id="result"></div>
+
+<script>
+  const vscode = acquireVsCodeApi();
+  const init = ${json};
+  const f = (id) => document.getElementById(id);
+  f('hubUrl').value = init.hubUrl || '';
+  f('hubTokenFile').value = init.hubTokenFile || '';
+  f('pythonPath').value = init.pythonPath || '';
+  f('refreshIntervalSeconds').value = init.refreshIntervalSeconds || 10;
+  f('autoStartHubPort').value = init.autoStartHubPort || 8765;
+  f('workspaceRoot').value = init.workspaceRoot || '';
+
+  function payload() {
+    return {
+      hubUrl: f('hubUrl').value,
+      hubToken: f('hubToken').value,
+      hubTokenFile: f('hubTokenFile').value,
+      pythonPath: f('pythonPath').value,
+      refreshIntervalSeconds: f('refreshIntervalSeconds').value,
+      autoStartHubPort: f('autoStartHubPort').value,
+      workspaceRoot: f('workspaceRoot').value,
+      role: (document.querySelector('input[name=role]:checked') || {}).value || 'runner',
+    };
+  }
+
+  f('saveBtn').onclick = () => vscode.postMessage(Object.assign({ type: 'save' }, payload()));
+  f('testBtn').onclick = () => vscode.postMessage({ type: 'test' });
+  f('applyBtn').onclick = () => vscode.postMessage(Object.assign({ type: 'applySetup' }, payload()));
+  f('genBtn').onclick = () => vscode.postMessage({ type: 'generateToken' });
+
+  window.addEventListener('message', (ev) => {
+    const m = ev.data;
+    const r = f('result');
+    if (m.type === 'testResult') {
+      r.style.display = 'block';
+      if (m.ok) {
+        r.className = 'ok';
+        r.textContent = 'OK \u2014 ' + m.url + '\\nstatus: ' + m.status + '\\nversion: ' + m.version + '\\nprotocol: v' + m.protocol;
+      } else {
+        r.className = 'err';
+        r.textContent = 'Failed: ' + m.error;
+      }
+    } else if (m.type === 'generatedToken') {
+      f('hubToken').value = m.token;
+      r.style.display = 'block';
+      r.className = 'ok';
+      r.textContent = 'Generated 128-bit token. Click Save to persist.';
+    }
+  });
+</script>
+</body>
+</html>`;
+}
+
