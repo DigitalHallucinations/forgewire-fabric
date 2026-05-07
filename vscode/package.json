@@ -2,7 +2,7 @@
   "name": "forgewire-fabric",
   "displayName": "ForgeWire Fabric",
   "description": "Dispatch tasks to a ForgeWire Fabric compute mesh: signed envelopes, scope-bound capability tokens, live stream output. Run a hub or runner from inside VS Code on Windows, macOS, or Linux.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "DigitalHallucinations",
   "license": "Apache-2.0",
   "icon": "media/icon.png",
@@ -41,6 +41,17 @@
           "type": "string",
           "default": "",
           "description": "Base URL of the ForgeWire hub (e.g. http://hub.local:8765). Leave empty to be prompted on first connect."
+        },
+        "forgewireFabric.hubName": {
+          "type": "string",
+          "default": "",
+          "description": "Friendly display name for the hub (shown in the sidebar and status bar). Purely cosmetic — no effect on hub identity or auth."
+        },
+        "forgewireFabric.runnerAliases": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": { "type": "string" },
+          "description": "Map of runner_id -> friendly alias. Used as the runner label in the sidebar."
         },
         "forgewireFabric.hubToken": {
           "type": "string",
@@ -146,6 +157,18 @@
         "title": "Open Settings…",
         "category": "ForgeWire Fabric",
         "icon": "$(gear)"
+      },
+      {
+        "command": "forgewireFabric.renameHub",
+        "title": "Rename Hub…",
+        "category": "ForgeWire Fabric",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "forgewireFabric.renameRunner",
+        "title": "Rename Runner…",
+        "category": "ForgeWire Fabric",
+        "icon": "$(edit)"
       }
     ],
     "viewsContainers": {
@@ -182,15 +205,18 @@
     "viewsWelcome": [
       {
         "view": "forgewireFabric.hub",
-        "contents": "No hub connection.\n\n[Connect to Hub](command:forgewireFabric.connectHub)\n\n[Open Settings](command:forgewireFabric.openSettings)\n\n[Start a Hub Locally](command:forgewireFabric.startHubHere)"
+        "contents": "No hub connection.\n\n[Connect to Hub](command:forgewireFabric.connectHub)\n\n[Open Settings](command:forgewireFabric.openSettings)\n\n[Start a Hub Locally](command:forgewireFabric.startHubHere)",
+        "when": "!forgewireFabric.connected"
       },
       {
         "view": "forgewireFabric.runners",
-        "contents": "No hub connection.\n\n[Connect to Hub](command:forgewireFabric.connectHub)\n\n[Start a Hub Locally](command:forgewireFabric.startHubHere)\n\n[Install the CLI](command:forgewireFabric.installCli)\n\nFirst time? Read the [ForgeWire Fabric quickstart](https://github.com/DigitalHallucinations/forgewire-fabric/blob/main/docs/QUICKSTART.md)."
+        "contents": "No hub connection.\n\n[Connect to Hub](command:forgewireFabric.connectHub)\n\n[Start a Hub Locally](command:forgewireFabric.startHubHere)\n\n[Install the CLI](command:forgewireFabric.installCli)\n\nFirst time? Read the [ForgeWire Fabric quickstart](https://github.com/DigitalHallucinations/forgewire-fabric/blob/main/docs/QUICKSTART.md).",
+        "when": "!forgewireFabric.connected"
       },
       {
         "view": "forgewireFabric.tasks",
-        "contents": "No hub connection.\n\n[Connect to Hub](command:forgewireFabric.connectHub)"
+        "contents": "No hub connection.\n\n[Connect to Hub](command:forgewireFabric.connectHub)",
+        "when": "!forgewireFabric.connected"
       }
     ],
     "menus": {
@@ -217,6 +243,16 @@
         }
       ],
       "view/item/context": [
+        {
+          "command": "forgewireFabric.renameHub",
+          "when": "view == forgewireFabric.hub && viewItem == hub.name",
+          "group": "inline@1"
+        },
+        {
+          "command": "forgewireFabric.renameRunner",
+          "when": "view == forgewireFabric.runners && viewItem == runner",
+          "group": "inline@1"
+        },
         {
           "command": "forgewireFabric.streamTask",
           "when": "view == forgewireFabric.tasks && viewItem == task",

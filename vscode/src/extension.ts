@@ -62,7 +62,9 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<void> {
     vscode.commands.registerCommand("forgewireFabric.showTask", showTaskCmd),
     vscode.commands.registerCommand("forgewireFabric.copyToken", copyToken),
     vscode.commands.registerCommand("forgewireFabric.generateToken", generateToken),
-    vscode.commands.registerCommand("forgewireFabric.openSettings", openSettings)
+    vscode.commands.registerCommand("forgewireFabric.openSettings", openSettings),
+    vscode.commands.registerCommand("forgewireFabric.renameHub", renameHub),
+    vscode.commands.registerCommand("forgewireFabric.renameRunner", renameRunner)
   );
 
   ctx.subscriptions.push(
@@ -95,8 +97,12 @@ function getClient(): HubClient | undefined {
 
 function updateStatus(): void {
   const c = getClient();
+  vscode.commands.executeCommand("setContext", "forgewireFabric.connected", !!c);
   if (c) {
-    statusItem.text = `$(plug) ForgeWire Fabric: ${labelForUrl(c.url)}`;
+    const cfg = vscode.workspace.getConfiguration("forgewireFabric");
+    const name = (cfg.get<string>("hubName") ?? "").trim();
+    const tag = name ? `${name} (${labelForUrl(c.url)})` : labelForUrl(c.url);
+    statusItem.text = `$(plug) ForgeWire Fabric: ${tag}`;
     statusItem.tooltip = new vscode.MarkdownString(
       `Connected to **${c.url}**.\n\nClick to reconnect.`
     );
@@ -564,6 +570,83 @@ async function showTaskCmd(arg: number | { id: number }): Promise<void> {
 // ---------------------------------------------------------------------------
 
 let settingsPanel: vscode.WebviewPanel | undefined;
+
+async function renameHub(): Promise<void> {
+  const cfg = vscode.workspace.getConfiguration("forgewireFabric");
+  const current = (cfg.get<string>("hubName") ?? "").trim();
+  const name = await vscode.window.showInputBox({
+    title: "Hub display name",
+    prompt: "A friendly name for this hub (shown in the sidebar and status bar). Leave blank to clear.",
+    value: current,
+    ignoreFocusOut: true,
+  });
+  if (name === undefined) {
+    return;
+  }
+  await cfg.update("hubName", name.trim(), vscode.ConfigurationTarget.Global);
+  updateStatus();
+  refreshAll();
+}
+
+async function renameRunner(arg?: { runner_id?: string } | string): Promise<void> {
+  const c = getClient();
+  let runnerId: string | undefined;
+  if (typeof arg === "string") {
+    runnerId = arg;
+  } else if (arg && typeof arg === "object" && typeof (arg as { runner_id?: string }).runner_id === "string") {
+    runnerId = (arg as { runner_id: string }).runner_id;
+  }
+  if (!runnerId) {
+    if (!c) {
+      vscode.window.showWarningMessage("Connect to a hub first.");
+      return;
+    }
+    let runners: { runner_id: string; hostname: string }[] = [];
+    try {
+      runners = (await c.listRunners()) as { runner_id: string; hostname: string }[];
+    } catch (err) {
+      vscode.window.showErrorMessage(
+        `Could not list runners: ${err instanceof Error ? err.message : String(err)}`
+      );
+      return;
+    }
+    const cfg = vscode.workspace.getConfiguration("forgewireFabric");
+    const aliases = cfg.get<Record<string, string>>("runnerAliases") ?? {};
+    const pick = await vscode.window.showQuickPick(
+      runners.map((r) => ({
+        label: aliases[r.runner_id] || r.hostname || r.runner_id.slice(0, 8),
+        description: r.hostname,
+        detail: r.runner_id,
+        runner_id: r.runner_id,
+      })),
+      { title: "Pick a runner to rename" }
+    );
+    if (!pick) {
+      return;
+    }
+    runnerId = pick.runner_id;
+  }
+
+  const cfg = vscode.workspace.getConfiguration("forgewireFabric");
+  const aliases = { ...(cfg.get<Record<string, string>>("runnerAliases") ?? {}) };
+  const currentAlias = aliases[runnerId] ?? "";
+  const next = await vscode.window.showInputBox({
+    title: `Alias for runner ${runnerId.slice(0, 8)}`,
+    prompt: "Friendly name for this runner. Leave blank to clear the alias.",
+    value: currentAlias,
+    ignoreFocusOut: true,
+  });
+  if (next === undefined) {
+    return;
+  }
+  if (next.trim()) {
+    aliases[runnerId] = next.trim();
+  } else {
+    delete aliases[runnerId];
+  }
+  await cfg.update("runnerAliases", aliases, vscode.ConfigurationTarget.Global);
+  refreshAll();
+}
 
 async function openSettings(): Promise<void> {
   if (settingsPanel) {

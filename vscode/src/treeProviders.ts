@@ -1,21 +1,6 @@
 import * as vscode from "vscode";
 import { HubClient, RunnerInfo, TaskInfo } from "./hubClient";
 
-abstract class BaseProvider<T> implements vscode.TreeDataProvider<T> {
-  private readonly _onDidChange = new vscode.EventEmitter<T | undefined | void>();
-  readonly onDidChangeTreeData = this._onDidChange.event;
-
-  protected items: T[] = [];
-  protected error: string | undefined;
-
-  refresh(): void {
-    this._onDidChange.fire();
-  }
-
-  abstract getTreeItem(element: T): vscode.TreeItem;
-  abstract getChildren(element?: T): Promise<T[]>;
-}
-
 // ---------------------------------------------------------------------------
 // Hub
 // ---------------------------------------------------------------------------
@@ -27,13 +12,12 @@ export interface HubNode {
   icon?: string;
   tooltip?: string;
   command?: vscode.Command;
+  contextValue?: string;
 }
 
 export class HubProvider implements vscode.TreeDataProvider<HubNode> {
   private readonly _onDidChange = new vscode.EventEmitter<HubNode | undefined | void>();
   readonly onDidChangeTreeData = this._onDidChange.event;
-
-  private cached: HubNode[] = [];
 
   constructor(private readonly client: () => HubClient | undefined) {}
 
@@ -46,8 +30,25 @@ export class HubProvider implements vscode.TreeDataProvider<HubNode> {
       return [];
     }
     const c = this.client();
+    const cfg = vscode.workspace.getConfiguration("forgewireFabric");
+    const hubName = (cfg.get<string>("hubName") ?? "").trim();
+
+    const renameCmd: vscode.Command = {
+      command: "forgewireFabric.renameHub",
+      title: "Rename Hub",
+    };
+
     if (!c) {
-      this.cached = [
+      return [
+        {
+          key: "name",
+          label: "Name",
+          description: hubName || "(unset)",
+          icon: "tag",
+          tooltip: "Click to set a friendly hub name.",
+          command: renameCmd,
+          contextValue: "hub.name",
+        },
         {
           key: "state",
           label: "Not connected",
@@ -62,16 +63,21 @@ export class HubProvider implements vscode.TreeDataProvider<HubNode> {
           key: "settings",
           label: "Open Settings\u2026",
           icon: "gear",
-          command: {
-            command: "forgewireFabric.openSettings",
-            title: "Open Settings",
-          },
+          command: { command: "forgewireFabric.openSettings", title: "Open Settings" },
         },
       ];
-      return this.cached;
     }
 
     const nodes: HubNode[] = [
+      {
+        key: "name",
+        label: "Name",
+        description: hubName || "(unset)",
+        icon: "tag",
+        tooltip: "Click to set a friendly hub name.",
+        command: renameCmd,
+        contextValue: "hub.name",
+      },
       {
         key: "url",
         label: "URL",
@@ -96,23 +102,20 @@ export class HubProvider implements vscode.TreeDataProvider<HubNode> {
           key: "version",
           label: "Hub version",
           description: h.version,
-          icon: "tag",
+          icon: "versions",
         },
         {
           key: "protocol",
           label: "Protocol",
           description: `v${h.protocol_version}`,
-          icon: "versions",
+          icon: "symbol-numeric",
         },
         {
           key: "runners",
           label: "Runners",
           description: `${online} online / ${runners.length} total`,
           icon: "server-environment",
-          command: {
-            command: "forgewireFabric.refresh",
-            title: "Refresh",
-          },
+          command: { command: "forgewireFabric.refresh", title: "Refresh" },
         }
       );
     } catch (err) {
@@ -129,13 +132,9 @@ export class HubProvider implements vscode.TreeDataProvider<HubNode> {
       key: "settings",
       label: "Settings\u2026",
       icon: "gear",
-      command: {
-        command: "forgewireFabric.openSettings",
-        title: "Open Settings",
-      },
+      command: { command: "forgewireFabric.openSettings", title: "Open Settings" },
     });
 
-    this.cached = nodes;
     return nodes;
   }
 
@@ -152,84 +151,212 @@ export class HubProvider implements vscode.TreeDataProvider<HubNode> {
     if (n.command) {
       item.command = n.command;
     }
-    item.contextValue = `hub.${n.key}`;
+    item.contextValue = n.contextValue ?? `hub.${n.key}`;
     return item;
   }
 }
 
 // ---------------------------------------------------------------------------
-// Runners
+// Runners (hierarchical: runner -> properties)
 // ---------------------------------------------------------------------------
 
-export class RunnersProvider extends BaseProvider<RunnerInfo> {
-  constructor(private readonly client: () => HubClient | undefined) {
-    super();
+export type RunnerNode =
+  | { kind: "runner"; runner: RunnerInfo }
+  | { kind: "prop"; runner: RunnerInfo; key: string; label: string; description: string; icon: string };
+
+export class RunnersProvider implements vscode.TreeDataProvider<RunnerNode> {
+  private readonly _onDidChange = new vscode.EventEmitter<RunnerNode | undefined | void>();
+  readonly onDidChangeTreeData = this._onDidChange.event;
+
+  constructor(private readonly client: () => HubClient | undefined) {}
+
+  refresh(): void {
+    this._onDidChange.fire();
   }
 
-  async getChildren(): Promise<RunnerInfo[]> {
+  async getChildren(element?: RunnerNode): Promise<RunnerNode[]> {
+    if (element?.kind === "runner") {
+      return runnerProps(element.runner);
+    }
+    if (element?.kind === "prop") {
+      return [];
+    }
     const c = this.client();
     if (!c) {
       return [];
     }
     try {
-      this.items = await c.listRunners();
-      this.error = undefined;
-    } catch (err) {
-      this.error = err instanceof Error ? err.message : String(err);
-      this.items = [];
+      const runners = await c.listRunners();
+      return runners.map((r) => ({ kind: "runner" as const, runner: r }));
+    } catch {
+      return [];
     }
-    return this.items;
   }
 
-  getTreeItem(r: RunnerInfo): vscode.TreeItem {
-    const label = `${r.hostname || r.runner_id.slice(0, 8)}  \u00b7  ${r.state}`;
-    const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.None);
-    item.id = `runner:${r.runner_id}`;
-    item.contextValue = "runner";
-    item.description = `${r.current_load}/${r.max_concurrent}  ${r.os}/${r.arch}`;
-    item.iconPath = new vscode.ThemeIcon(
-      r.state === "online" ? "circle-filled" : r.state === "draining" ? "circle-slash" : "circle-outline"
-    );
-    const tags = (r.tags ?? []).join(", ") || "<no tags>";
-    const scopes = (r.scope_prefixes ?? []).join(", ") || "<unscoped>";
-    item.tooltip = new vscode.MarkdownString(
-      `**${r.hostname}** \`${r.runner_id}\`\n\n` +
-        `- state: ${r.state}\n- os: ${r.os} (${r.arch})\n- tags: ${tags}\n- scope: ${scopes}\n` +
-        `- last heartbeat: ${r.last_heartbeat ?? "?"}\n- load: ${r.current_load}/${r.max_concurrent}`
-    );
+  getTreeItem(n: RunnerNode): vscode.TreeItem {
+    if (n.kind === "runner") {
+      const r = n.runner;
+      const cfg = vscode.workspace.getConfiguration("forgewireFabric");
+      const aliases = cfg.get<Record<string, string>>("runnerAliases") ?? {};
+      const alias = aliases[r.runner_id];
+      const label = alias || r.hostname || r.runner_id.slice(0, 8);
+      const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.Collapsed);
+      item.id = `runner:${r.runner_id}`;
+      item.contextValue = "runner";
+      item.description = r.state;
+      item.iconPath = new vscode.ThemeIcon(
+        r.state === "online" ? "circle-filled" : r.state === "draining" ? "circle-slash" : "circle-outline"
+      );
+      const tags = (r.tags ?? []).join(", ") || "<no tags>";
+      const scopes = (r.scope_prefixes ?? []).join(", ") || "<unscoped>";
+      item.tooltip = new vscode.MarkdownString(
+        (alias ? `**${alias}**  \u00b7  hostname: ${r.hostname}\n\n` : `**${r.hostname}**\n\n`) +
+          `- runner_id: \`${r.runner_id}\`\n- state: ${r.state}\n- os: ${r.os} (${r.arch})\n- tags: ${tags}\n- scope: ${scopes}\n` +
+          `- last heartbeat: ${r.last_heartbeat ?? "?"}\n- load: ${r.current_load}/${r.max_concurrent}`
+      );
+      return item;
+    }
+
+    const item = new vscode.TreeItem(n.label, vscode.TreeItemCollapsibleState.None);
+    item.id = `runner:${n.runner.runner_id}:${n.key}`;
+    item.description = n.description;
+    item.iconPath = new vscode.ThemeIcon(n.icon);
+    item.contextValue = `runnerProp.${n.key}`;
     return item;
   }
+}
+
+function runnerProps(r: RunnerInfo): RunnerNode[] {
+  const cfg = vscode.workspace.getConfiguration("forgewireFabric");
+  const aliases = cfg.get<Record<string, string>>("runnerAliases") ?? {};
+  const alias = aliases[r.runner_id];
+  const tags = (r.tags ?? []).join(", ") || "<none>";
+  const scopes = (r.scope_prefixes ?? []).join(", ") || "<unscoped>";
+  const props: RunnerNode[] = [];
+  if (alias) {
+    props.push({
+      kind: "prop",
+      runner: r,
+      key: "hostname",
+      label: "Hostname",
+      description: r.hostname,
+      icon: "device-desktop",
+    });
+  }
+  props.push(
+    {
+      kind: "prop",
+      runner: r,
+      key: "id",
+      label: "Runner ID",
+      description: r.runner_id,
+      icon: "key",
+    },
+    {
+      kind: "prop",
+      runner: r,
+      key: "load",
+      label: "Load",
+      description: `${r.current_load}/${r.max_concurrent}`,
+      icon: "pulse",
+    },
+    {
+      kind: "prop",
+      runner: r,
+      key: "os",
+      label: "OS / arch",
+      description: `${r.os} / ${r.arch}`,
+      icon: "device-desktop",
+    },
+    {
+      kind: "prop",
+      runner: r,
+      key: "tags",
+      label: "Tags",
+      description: tags,
+      icon: "tag",
+    },
+    {
+      kind: "prop",
+      runner: r,
+      key: "scope",
+      label: "Scope",
+      description: scopes,
+      icon: "folder",
+    },
+    {
+      kind: "prop",
+      runner: r,
+      key: "heartbeat",
+      label: "Last heartbeat",
+      description: r.last_heartbeat ?? "?",
+      icon: "history",
+    }
+  );
+  return props;
 }
 
 // ---------------------------------------------------------------------------
 // Tasks
 // ---------------------------------------------------------------------------
 
-export class TasksProvider extends BaseProvider<TaskInfo> {
-  constructor(private readonly client: () => HubClient | undefined) {
-    super();
+export type TaskNode =
+  | { kind: "task"; task: TaskInfo }
+  | { kind: "placeholder"; label: string; icon: string; description?: string };
+
+export class TasksProvider implements vscode.TreeDataProvider<TaskNode> {
+  private readonly _onDidChange = new vscode.EventEmitter<TaskNode | undefined | void>();
+  readonly onDidChangeTreeData = this._onDidChange.event;
+
+  constructor(private readonly client: () => HubClient | undefined) {}
+
+  refresh(): void {
+    this._onDidChange.fire();
   }
 
-  async getChildren(): Promise<TaskInfo[]> {
+  async getChildren(element?: TaskNode): Promise<TaskNode[]> {
+    if (element) {
+      return [];
+    }
     const c = this.client();
     if (!c) {
       return [];
     }
     try {
-      this.items = await c.listTasks(50);
-      this.error = undefined;
+      const tasks = await c.listTasks(50);
+      if (tasks.length === 0) {
+        return [
+          {
+            kind: "placeholder",
+            label: "No tasks yet",
+            description: "dispatch one to see it here",
+            icon: "inbox",
+          },
+        ];
+      }
+      return tasks.map((t) => ({ kind: "task" as const, task: t }));
     } catch (err) {
-      this.error = err instanceof Error ? err.message : String(err);
-      this.items = [];
+      return [
+        {
+          kind: "placeholder",
+          label: "Hub unreachable",
+          description: err instanceof Error ? err.message : String(err),
+          icon: "warning",
+        },
+      ];
     }
-    return this.items;
   }
 
-  getTreeItem(t: TaskInfo): vscode.TreeItem {
-    const item = new vscode.TreeItem(
-      `#${t.id}  ${t.title}`,
-      vscode.TreeItemCollapsibleState.None
-    );
+  getTreeItem(n: TaskNode): vscode.TreeItem {
+    if (n.kind === "placeholder") {
+      const item = new vscode.TreeItem(n.label, vscode.TreeItemCollapsibleState.None);
+      item.description = n.description;
+      item.iconPath = new vscode.ThemeIcon(n.icon);
+      item.contextValue = "task.placeholder";
+      return item;
+    }
+    const t = n.task;
+    const item = new vscode.TreeItem(`#${t.id}  ${t.title}`, vscode.TreeItemCollapsibleState.None);
     item.id = `task:${t.id}`;
     item.contextValue = "task";
     item.description = `${t.status} \u00b7 ${t.branch}`;
