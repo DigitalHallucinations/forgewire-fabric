@@ -306,7 +306,61 @@ def setup(
         click.echo(f"Installing runner -> {hub_url} (workspace: {workspace_root})...")
         install_runner(hub_url=hub_url, hub_token=hub_token, workspace_root=workspace_root)
 
+    # --- VS Code wiring (user-readable token + extension settings) ---
+    # The system-wide token at C:\ProgramData\forgewire\hub.token is locked to
+    # SYSTEM + Administrators (correct for a service), but the VS Code
+    # extension runs as the user. Drop a user-readable copy and point the
+    # extension at it via VS Code user settings.json so the sidebar populates
+    # without asking the user to paste anything.
+    try:
+        _write_vscode_user_settings(hub_url=hub_url or f"http://127.0.0.1:{port}",
+                                    hub_token=hub_token)
+        click.echo("Wired VS Code extension (forgewireFabric.hubUrl + token file).")
+    except Exception as exc:  # pragma: no cover - best-effort
+        click.echo(f"Note: could not auto-wire VS Code settings: {exc}", err=True)
+
     click.echo("Setup complete.")
+
+
+def _write_vscode_user_settings(*, hub_url: str, hub_token: str) -> None:
+    """Best-effort: drop a user-readable hub token and update VS Code user
+    settings.json so the ForgeWire Fabric extension can discover the hub
+    without manual configuration. Idempotent: leaves unrelated keys alone.
+    """
+    import json
+    from pathlib import Path as _P
+
+    home = _P.home()
+    user_token_dir = home / ".forgewire"
+    user_token_dir.mkdir(parents=True, exist_ok=True)
+    user_token = user_token_dir / "hub.token"
+    user_token.write_text(hub_token.strip(), encoding="utf-8")
+
+    if sys.platform.startswith("win"):
+        settings_path = _P(os.environ.get("APPDATA", str(home))) / "Code" / "User" / "settings.json"
+    elif sys.platform == "darwin":
+        settings_path = home / "Library" / "Application Support" / "Code" / "User" / "settings.json"
+    else:
+        settings_path = home / ".config" / "Code" / "User" / "settings.json"
+
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    if settings_path.exists():
+        try:
+            current = json.loads(settings_path.read_text(encoding="utf-8") or "{}")
+        except json.JSONDecodeError:
+            # Don't clobber a hand-broken file; bail out.
+            raise
+    else:
+        current = {}
+
+    # Drop any pre-rename keys so they cannot shadow the new ones.
+    current.pop("forgewire.hubUrl", None)
+    current.pop("forgewire.hubToken", None)
+    current.pop("forgewire.hubTokenFile", None)
+    current["forgewireFabric.hubUrl"] = hub_url
+    current["forgewireFabric.hubTokenFile"] = str(user_token)
+    settings_path.write_text(json.dumps(current, indent=4), encoding="utf-8")
+
 
 
 # ---------------------------------------------------------------------------
