@@ -223,6 +223,70 @@ def runner_uninstall() -> None:
 
 
 # ---------------------------------------------------------------------------
+# mcp (VS Code MCP server registration)
+# ---------------------------------------------------------------------------
+
+
+@cli.group(help="MCP control-plane wiring (VS Code mcp.json).")
+def mcp() -> None:
+    pass
+
+
+@mcp.command("install", help=(
+    "Register forgewire-dispatcher (and optionally forgewire-runner) in the "
+    "VS Code user-scope mcp.json. Re-runs idempotently and prunes legacy "
+    "scripts.remote.hub entries."
+))
+@click.option("--hub-url", default=None,
+              help="Hub URL the dispatcher MCP server connects to. "
+              "Defaults to forgewireFabric.hubUrl from VS Code settings, "
+              "else http://127.0.0.1:8765.")
+@click.option("--with-runner", is_flag=True, default=False,
+              help="Also register forgewire-runner (only for hosts that run a runner).")
+@click.option("--workspace-root", default=None,
+              help="Runner workspace root for the runner MCP entry (when --with-runner).")
+def mcp_install(hub_url: str | None, with_runner: bool, workspace_root: str | None) -> None:
+    if not hub_url:
+        # Try to read from existing user settings
+        try:
+            settings_path = _vscode_user_dir() / "settings.json"
+            if settings_path.exists():
+                cur = json.loads(settings_path.read_text(encoding="utf-8") or "{}")
+                hub_url = cur.get("forgewireFabric.hubUrl") or None
+        except Exception:
+            hub_url = None
+    if not hub_url:
+        hub_url = "http://127.0.0.1:8765"
+    _write_vscode_user_mcp(
+        hub_url=hub_url,
+        install_runner=with_runner,
+        workspace_root=workspace_root,
+    )
+    click.echo(f"Wired VS Code MCP servers (hub_url={hub_url}, runner={with_runner}).")
+
+
+@mcp.command("uninstall", help="Remove ForgeWire MCP servers from the VS Code user-scope mcp.json.")
+def mcp_uninstall() -> None:
+    mcp_path = _vscode_user_dir() / "mcp.json"
+    if not mcp_path.exists():
+        click.echo("No user-scope mcp.json found; nothing to do.")
+        return
+    try:
+        cur = json.loads(mcp_path.read_text(encoding="utf-8") or "{}")
+    except json.JSONDecodeError:
+        raise SystemExit(f"{mcp_path} is not valid JSON; refusing to edit.")
+    servers = cur.get("servers") or {}
+    removed = []
+    for k in ("forgewire-dispatcher", "forgewire-runner"):
+        if k in servers:
+            servers.pop(k)
+            removed.append(k)
+    cur["servers"] = servers
+    mcp_path.write_text(json.dumps(cur, indent=4), encoding="utf-8")
+    click.echo(f"Removed: {', '.join(removed) if removed else '(none)'}")
+
+
+# ---------------------------------------------------------------------------
 # setup (one-shot)
 # ---------------------------------------------------------------------------
 
@@ -319,6 +383,21 @@ def setup(
     except Exception as exc:  # pragma: no cover - best-effort
         click.echo(f"Note: could not auto-wire VS Code settings: {exc}", err=True)
 
+    # --- VS Code MCP wiring (forgewire-dispatcher / forgewire-runner) ---
+    # Same idea but for the MCP control plane. We always wire the dispatcher
+    # entry (every host is potentially a driver). The runner entry is only
+    # wired when this host actually runs a runner.
+    try:
+        _write_vscode_user_mcp(
+            hub_url=hub_url or f"http://127.0.0.1:{port}",
+            install_runner=install_role_runner,
+            workspace_root=workspace_root,
+        )
+        click.echo("Wired VS Code MCP servers (forgewire-dispatcher"
+                   + (" + forgewire-runner)" if install_role_runner else ")"))
+    except Exception as exc:  # pragma: no cover - best-effort
+        click.echo(f"Note: could not auto-wire VS Code MCP: {exc}", err=True)
+
     click.echo("Setup complete.")
 
 
@@ -360,6 +439,107 @@ def _write_vscode_user_settings(*, hub_url: str, hub_token: str) -> None:
     current["forgewireFabric.hubUrl"] = hub_url
     current["forgewireFabric.hubTokenFile"] = str(user_token)
     settings_path.write_text(json.dumps(current, indent=4), encoding="utf-8")
+
+
+def _vscode_user_dir() -> "Path":
+    from pathlib import Path as _P
+
+    home = _P.home()
+    if sys.platform.startswith("win"):
+        return _P(os.environ.get("APPDATA", str(home))) / "Code" / "User"
+    if sys.platform == "darwin":
+        return home / "Library" / "Application Support" / "Code" / "User"
+    return home / ".config" / "Code" / "User"
+
+
+def _write_vscode_user_mcp(
+    *,
+    hub_url: str,
+    install_runner: bool,
+    workspace_root: str | None,
+) -> None:
+    """Best-effort: register the ForgeWire MCP servers in VS Code's user-scope
+    ``mcp.json`` so any window picks them up without per-workspace config.
+
+    * ``forgewire-dispatcher`` always wired -- every box might drive.
+    * ``forgewire-runner`` only wired when this host installs a runner; it
+      points at the local hub (127.0.0.1) since they are colocated.
+
+    Stale entries from the legacy ``forgewire`` repo (``BLACKBOARD_*`` env,
+    ``scripts.remote.hub.*`` modules) are pruned so the OptiPlex stops
+    spawning the old version.
+    """
+    import json
+    from pathlib import Path as _P
+
+    home = _P.home()
+    user_token = home / ".forgewire" / "hub.token"
+
+    py = _python_for_mcp()
+
+    dispatcher_entry = {
+        "command": py,
+        "args": ["-m", "forgewire_fabric.hub.dispatcher_mcp"],
+        "env": {
+            "FORGEWIRE_HUB_URL": hub_url,
+            "FORGEWIRE_HUB_TOKEN_FILE": str(user_token),
+        },
+    }
+
+    mcp_path = _vscode_user_dir() / "mcp.json"
+    mcp_path.parent.mkdir(parents=True, exist_ok=True)
+    if mcp_path.exists():
+        try:
+            current = json.loads(mcp_path.read_text(encoding="utf-8") or "{}")
+        except json.JSONDecodeError:
+            # Don't clobber a hand-broken file.
+            raise
+    else:
+        current = {"$schema": "https://aka.ms/vscode-mcp-schema"}
+
+    servers = current.setdefault("servers", {})
+
+    # Drop legacy entries so we never run two versions side-by-side.
+    for stale_key in ("forgewire-dispatcher", "forgewire-runner"):
+        existing = servers.get(stale_key)
+        if isinstance(existing, dict):
+            args = existing.get("args") or []
+            if any("scripts.remote.hub" in str(a) for a in args):
+                servers.pop(stale_key, None)
+
+    servers["forgewire-dispatcher"] = dispatcher_entry
+
+    if install_runner:
+        runner_env = {
+            "FORGEWIRE_HUB_URL": "http://127.0.0.1:8765",
+            "FORGEWIRE_HUB_TOKEN_FILE": str(user_token),
+        }
+        if workspace_root:
+            runner_env["FORGEWIRE_RUNNER_WORKSPACE_ROOT"] = workspace_root
+        servers["forgewire-runner"] = {
+            "command": py,
+            "args": ["-m", "forgewire_fabric.hub.runner_mcp"],
+            "env": runner_env,
+        }
+    else:
+        # If we are not running a runner here, drop any stale runner entry so
+        # the dispatcher doesn't try to start one on a box that has no hub.
+        servers.pop("forgewire-runner", None)
+
+    mcp_path.write_text(json.dumps(current, indent=4), encoding="utf-8")
+
+
+def _python_for_mcp() -> str:
+    """Return a python interpreter path for the MCP server entries.
+
+    We prefer the *current* interpreter (the one that just installed
+    ``forgewire-fabric``), since that is guaranteed to have the package
+    importable. Fall back to ``python`` on PATH.
+    """
+    exe = sys.executable
+    if exe and Path(exe).exists():
+        return exe
+    return "python"
 
 
 
