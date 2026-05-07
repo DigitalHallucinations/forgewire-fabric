@@ -2,7 +2,7 @@
   "name": "forgewire-fabric",
   "displayName": "ForgeWire Fabric",
   "description": "Dispatch tasks to a ForgeWire Fabric compute mesh: signed envelopes, scope-bound capability tokens, live stream output. Run a hub or runner from inside VS Code on Windows, macOS, or Linux.",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "publisher": "DigitalHallucinations",
   "license": "Apache-2.0",
   "icon": "media/icon.png",
@@ -40,7 +40,26 @@
         "forgewireFabric.hubUrl": {
           "type": "string",
           "default": "",
-          "description": "Base URL of the ForgeWire hub (e.g. http://hub.local:8765). Leave empty to be prompted on first connect."
+          "description": "Base URL of the ForgeWire hub (e.g. http://hub.local:8765). Leave empty to be prompted on first connect. When forgewireFabric.hubCandidates is non-empty this acts as an implicit additional candidate at priority 100."
+        },
+        "forgewireFabric.hubCandidates": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "object",
+            "required": ["url"],
+            "properties": {
+              "url": { "type": "string", "description": "Candidate hub URL." },
+              "label": { "type": "string", "description": "Friendly label for the sidebar." },
+              "priority": { "type": "number", "default": 100, "description": "Lower = preferred. Probed in ascending order." }
+            }
+          },
+          "markdownDescription": "Ordered list of hub candidates for failover. The extension probes each candidate in priority order and uses the first reachable one as the active hub. Example:\n```\n[\n  { \"url\": \"http://10.120.81.95:8765\", \"label\": \"OptiPlex (always-on)\", \"priority\": 1 },\n  { \"url\": \"http://10.120.81.50:8765\", \"label\": \"Dell\", \"priority\": 2 }\n]\n```"
+        },
+        "forgewireFabric.hubPin": {
+          "type": "string",
+          "default": "",
+          "description": "Manual override: when set, the extension dispatches to this URL only and does not probe candidates. Use the *Pin to Hub…* command to set this. Clear with *Unpin Hub*."
         },
         "forgewireFabric.hubName": {
           "type": "string",
@@ -198,6 +217,36 @@
         "title": "Stop Runner Service (local)",
         "category": "ForgeWire Fabric",
         "icon": "$(debug-stop)"
+      },
+      {
+        "command": "forgewireFabric.pinHub",
+        "title": "Pin to Hub…",
+        "category": "ForgeWire Fabric",
+        "icon": "$(pin)"
+      },
+      {
+        "command": "forgewireFabric.unpinHub",
+        "title": "Unpin Hub",
+        "category": "ForgeWire Fabric",
+        "icon": "$(pinned)"
+      },
+      {
+        "command": "forgewireFabric.promoteHub",
+        "title": "Promote This Node to Hub…",
+        "category": "ForgeWire Fabric",
+        "icon": "$(arrow-up)"
+      },
+      {
+        "command": "forgewireFabric.demoteHub",
+        "title": "Demote Active Hub…",
+        "category": "ForgeWire Fabric",
+        "icon": "$(arrow-down)"
+      },
+      {
+        "command": "forgewireFabric.editHubCandidates",
+        "title": "Edit Hub Candidates…",
+        "category": "ForgeWire Fabric",
+        "icon": "$(list-tree)"
       }
     ],
     "viewsContainers": {
@@ -278,6 +327,21 @@
           "group": "inline@1"
         },
         {
+          "command": "forgewireFabric.pinHub",
+          "when": "view == forgewireFabric.hub && viewItem == hub.url.auto",
+          "group": "inline@1"
+        },
+        {
+          "command": "forgewireFabric.unpinHub",
+          "when": "view == forgewireFabric.hub && viewItem == hub.url.pinned",
+          "group": "inline@1"
+        },
+        {
+          "command": "forgewireFabric.editHubCandidates",
+          "when": "view == forgewireFabric.hub && viewItem == hub.candidates",
+          "group": "inline@1"
+        },
+        {
           "command": "forgewireFabric.renameRunner",
           "when": "view == forgewireFabric.runners && viewItem =~ /^runner\\./",
           "group": "inline@1"
@@ -346,6 +410,21 @@
         },
         {
           "command": "forgewireFabric.stopRunnerService"
+        },
+        {
+          "command": "forgewireFabric.pinHub"
+        },
+        {
+          "command": "forgewireFabric.unpinHub"
+        },
+        {
+          "command": "forgewireFabric.promoteHub"
+        },
+        {
+          "command": "forgewireFabric.demoteHub"
+        },
+        {
+          "command": "forgewireFabric.editHubCandidates"
         }
       ]
     }

@@ -22,6 +22,10 @@ let tasksProvider: TasksProvider;
 let refreshTimer: NodeJS.Timeout | undefined;
 let context: vscode.ExtensionContext;
 
+// Active hub state: maintained by probeActiveHub() on every refresh tick.
+let activeClient: HubClient | undefined;
+let lastProbe: Awaited<ReturnType<typeof HubClient.probe>> | undefined;
+
 // ---------------------------------------------------------------------------
 // activation
 // ---------------------------------------------------------------------------
@@ -39,7 +43,7 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<void> {
   // Hydrate token from SecretStorage into the live HubClient lookup.
   await hydrateTokenFromSecret();
 
-  hubProvider = new HubProvider(getClient);
+  hubProvider = new HubProvider(getClient, getProbe);
   runnersProvider = new RunnersProvider(getClient);
   tasksProvider = new TasksProvider(getClient);
   ctx.subscriptions.push(
@@ -69,7 +73,12 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<void> {
     vscode.commands.registerCommand("forgewireFabric.resumeRunner", resumeRunner),
     vscode.commands.registerCommand("forgewireFabric.restartRunnerService", restartRunnerService),
     vscode.commands.registerCommand("forgewireFabric.startRunnerService", startRunnerService),
-    vscode.commands.registerCommand("forgewireFabric.stopRunnerService", stopRunnerService)
+    vscode.commands.registerCommand("forgewireFabric.stopRunnerService", stopRunnerService),
+    vscode.commands.registerCommand("forgewireFabric.pinHub", pinHub),
+    vscode.commands.registerCommand("forgewireFabric.unpinHub", unpinHub),
+    vscode.commands.registerCommand("forgewireFabric.promoteHub", promoteHub),
+    vscode.commands.registerCommand("forgewireFabric.demoteHub", demoteHub),
+    vscode.commands.registerCommand("forgewireFabric.editHubCandidates", editHubCandidates)
   );
 
   ctx.subscriptions.push(
@@ -97,7 +106,13 @@ export function deactivate(): void {
 // ---------------------------------------------------------------------------
 
 function getClient(): HubClient | undefined {
-  return HubClient.fromConfig();
+  // First refresh hasn't run yet -- fall back to direct config so that the
+  // very first refresh tick still renders something useful.
+  return activeClient ?? HubClient.fromConfig();
+}
+
+function getProbe(): typeof lastProbe {
+  return lastProbe;
 }
 
 function updateStatus(): void {
@@ -107,9 +122,11 @@ function updateStatus(): void {
     const cfg = vscode.workspace.getConfiguration("forgewireFabric");
     const name = (cfg.get<string>("hubName") ?? "").trim();
     const tag = name ? `${name} (${labelForUrl(c.url)})` : labelForUrl(c.url);
-    statusItem.text = `$(plug) ForgeWire Fabric: ${tag}`;
+    const prefix = lastProbe?.pinned ? "$(pin)" : "$(plug)";
+    statusItem.text = `${prefix} ForgeWire Fabric: ${tag}`;
+    const pinNote = lastProbe?.pinned ? "\n\n_(pinned -- failover disabled until you unpin)_" : "";
     statusItem.tooltip = new vscode.MarkdownString(
-      `Connected to **${c.url}**.\n\nClick to reconnect.`
+      `Connected to **${c.url}**.${pinNote}\n\nClick to reconnect.`
     );
   } else {
     statusItem.text = "$(debug-disconnect) ForgeWire Fabric";
@@ -137,6 +154,20 @@ function scheduleRefresh(): void {
 }
 
 function refreshAll(): void {
+  // Re-probe candidates first; HubProvider/RunnersProvider/TasksProvider all
+  // read activeClient via getClient() so they need probe to settle first.
+  void probeAndRefresh();
+}
+
+async function probeAndRefresh(): Promise<void> {
+  try {
+    const probe = await HubClient.probe();
+    activeClient = probe.active;
+    lastProbe = probe;
+  } catch (err) {
+    outputChannel.appendLine(`probe failed: ${err}`);
+  }
+  updateStatus();
   hubProvider?.refresh();
   runnersProvider?.refresh();
   tasksProvider?.refresh();
@@ -857,6 +888,99 @@ async function startRunnerService(arg?: unknown): Promise<void> {
 
 async function stopRunnerService(arg?: unknown): Promise<void> {
   return localServiceAction("stop", arg);
+}
+
+// ---------------------------------------------------------------------------
+// commands: failover (pin / unpin / promote / demote / edit candidates)
+// ---------------------------------------------------------------------------
+
+async function pinHub(): Promise<void> {
+  const cfg = vscode.workspace.getConfiguration("forgewireFabric");
+  const candidates = (cfg.get<Array<{ url: string; label?: string }>>("hubCandidates") ?? []);
+  const items: vscode.QuickPickItem[] = [
+    ...candidates.map((c) => ({ label: c.url, description: c.label || "" })),
+    { label: "Other URL\u2026", description: "Type a hub URL manually" },
+  ];
+  const pick = await vscode.window.showQuickPick(items, {
+    title: "Pin to which hub URL?",
+    placeHolder: "Pinning disables auto-failover until you unpin.",
+  });
+  if (!pick) return;
+  let url = pick.label;
+  if (url === "Other URL\u2026") {
+    const typed = await vscode.window.showInputBox({
+      title: "Pin to hub URL",
+      placeHolder: "http://10.120.81.95:8765",
+      validateInput: (v) => (/^https?:\/\//i.test(v.trim()) ? null : "Must start with http:// or https://"),
+    });
+    if (!typed) return;
+    url = typed.trim();
+  }
+  await cfg.update("hubPin", url, vscode.ConfigurationTarget.Global);
+  vscode.window.showInformationMessage(`Pinned to ${url}. Failover is now disabled.`);
+  refreshAll();
+}
+
+async function unpinHub(): Promise<void> {
+  const cfg = vscode.workspace.getConfiguration("forgewireFabric");
+  await cfg.update("hubPin", "", vscode.ConfigurationTarget.Global);
+  vscode.window.showInformationMessage("Unpinned. Failover re-enabled.");
+  refreshAll();
+}
+
+async function editHubCandidates(): Promise<void> {
+  // Open the JSON settings UI focused on the candidates array.
+  await vscode.commands.executeCommand(
+    "workbench.action.openSettings",
+    "forgewireFabric.hubCandidates"
+  );
+}
+
+async function promoteHub(): Promise<void> {
+  const ok = await vscode.window.showWarningMessage(
+    "Promote this node to active hub?\n\n" +
+      "This will start the local hub service. If another hub is already serving on the candidate list, promotion will be refused (split-brain guard) -- demote that one first, or pass --force from the CLI.",
+    { modal: true },
+    "Promote"
+  );
+  if (ok !== "Promote") return;
+  if (process.platform !== "win32") {
+    vscode.window.showWarningMessage(
+      "Promote currently launches NSSM via PowerShell on Windows. On macOS/Linux, run `forgewire-fabric hub promote` manually."
+    );
+    return;
+  }
+  const term = getOrCreateTerminal("ForgeWire Fabric: promote");
+  term.show();
+  // Use the bundled python exe; setup wizard wires PYTHONHOME automatically.
+  term.sendText(
+    'powershell -NoProfile -Command "Start-Process -Verb RunAs -Wait -FilePath python -ArgumentList \'-m\',\'forgewire_fabric.cli\',\'hub\',\'promote\'"'
+  );
+  setTimeout(refreshAll, 6000);
+}
+
+async function demoteHub(): Promise<void> {
+  const probe = lastProbe;
+  const target = probe?.activeUrl ?? "(active hub)";
+  const ok = await vscode.window.showWarningMessage(
+    `Demote ${target}?\n\n` +
+      "This drains all runners, pushes a final SQLite snapshot to peers in the candidate list, then stops the hub service. After this, the next-priority candidate should be Promoted.",
+    { modal: true },
+    "Demote"
+  );
+  if (ok !== "Demote") return;
+  if (process.platform !== "win32") {
+    vscode.window.showWarningMessage(
+      "Demote currently launches NSSM via PowerShell on Windows. On macOS/Linux, run `forgewire-fabric hub demote` manually."
+    );
+    return;
+  }
+  const term = getOrCreateTerminal("ForgeWire Fabric: demote");
+  term.show();
+  term.sendText(
+    'powershell -NoProfile -Command "Start-Process -Verb RunAs -Wait -FilePath python -ArgumentList \'-m\',\'forgewire_fabric.cli\',\'hub\',\'demote\'"'
+  );
+  setTimeout(refreshAll, 6000);
 }
 
 async function openSettings(): Promise<void> {

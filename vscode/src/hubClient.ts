@@ -74,6 +74,64 @@ export class HubClient {
     return new HubClient(baseUrl.replace(/\/+$/, ""), token);
   }
 
+  /**
+   * Probe each candidate URL in priority order (lowest priority first; ties
+   * broken by uptime: highest uptime wins). Returns the first reachable
+   * candidate plus all probe results for UI display.
+   *
+   * If `forgewireFabric.hubPin` is set, that URL is returned directly without
+   * probing -- this is the manual-override path.
+   */
+  static async probe(): Promise<{
+    active: HubClient | undefined;
+    activeUrl: string | undefined;
+    pinned: boolean;
+    probes: Array<{ url: string; label?: string; priority?: number; ok: boolean; uptime?: number; error?: string }>;
+  }> {
+    const cfg = vscode.workspace.getConfiguration("forgewireFabric");
+    const token = readToken(cfg);
+    const pin = (cfg.get<string>("hubPin") ?? "").trim();
+    if (pin) {
+      const c = token ? new HubClient(pin.replace(/\/+$/, ""), token) : undefined;
+      let probe = { url: pin, ok: false } as any;
+      if (c) {
+        try {
+          const h = await c.healthz();
+          probe = { url: pin, ok: true, uptime: h.uptime_seconds };
+        } catch (err) {
+          probe = { url: pin, ok: false, error: String(err) };
+        }
+      }
+      return { active: probe.ok ? c : undefined, activeUrl: probe.ok ? pin : undefined, pinned: true, probes: [probe] };
+    }
+    const candidates = (cfg.get<Array<{ url: string; label?: string; priority?: number }>>("hubCandidates") ?? []).slice();
+    // Back-compat: include hubUrl as an implicit highest-priority candidate.
+    const legacy = (cfg.get<string>("hubUrl") ?? "").trim();
+    if (legacy && !candidates.find((c) => (c.url ?? "").trim() === legacy)) {
+      candidates.push({ url: legacy, label: "default", priority: 100 });
+    }
+    candidates.sort((a, b) => (a.priority ?? 100) - (b.priority ?? 100));
+    const probes: Array<any> = [];
+    let active: HubClient | undefined;
+    let activeUrl: string | undefined;
+    for (const cand of candidates) {
+      const url = (cand.url ?? "").trim().replace(/\/+$/, "");
+      if (!url || !token) continue;
+      const c = new HubClient(url, token);
+      try {
+        const h = await c.healthz();
+        probes.push({ url, label: cand.label, priority: cand.priority, ok: true, uptime: h.uptime_seconds });
+        if (!active) {
+          active = c;
+          activeUrl = url;
+        }
+      } catch (err) {
+        probes.push({ url, label: cand.label, priority: cand.priority, ok: false, error: String(err) });
+      }
+    }
+    return { active, activeUrl, pinned: false, probes };
+  }
+
   get url(): string {
     return this.baseUrl;
   }
@@ -100,7 +158,7 @@ export class HubClient {
     return (await res.json()) as T;
   }
 
-  async healthz(): Promise<{ status: string; protocol_version: number; version: string }> {
+  async healthz(): Promise<{ status: string; protocol_version: number; version: string; uptime_seconds?: number; started_at?: number; host?: string; port?: number }> {
     return this.request("GET", "/healthz");
   }
 

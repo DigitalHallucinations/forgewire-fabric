@@ -16,11 +16,21 @@ export interface HubNode {
   contextValue?: string;
 }
 
+export interface ProbeInfo {
+  active: HubClient | undefined;
+  activeUrl: string | undefined;
+  pinned: boolean;
+  probes: Array<{ url: string; label?: string; priority?: number; ok: boolean; uptime?: number; error?: string }>;
+}
+
 export class HubProvider implements vscode.TreeDataProvider<HubNode> {
   private readonly _onDidChange = new vscode.EventEmitter<HubNode | undefined | void>();
   readonly onDidChangeTreeData = this._onDidChange.event;
 
-  constructor(private readonly client: () => HubClient | undefined) {}
+  constructor(
+    private readonly client: () => HubClient | undefined,
+    private readonly probe: () => ProbeInfo | undefined = () => undefined
+  ) {}
 
   refresh(): void {
     this._onDidChange.fire();
@@ -92,12 +102,41 @@ export class HubProvider implements vscode.TreeDataProvider<HubNode> {
       },
       {
         key: "url",
-        label: "URL",
+        label: "Active hub",
         description: c.url,
         icon: "link",
-        tooltip: c.url,
+        tooltip: new vscode.MarkdownString(
+          `Currently dispatching to **${c.url}**.\n\n` +
+            (this.probe()?.pinned
+              ? "_Pinned manually -- failover is disabled until you unpin._"
+              : "_Auto-selected by probing the candidate list in priority order._")
+        ).value,
+        contextValue: this.probe()?.pinned ? "hub.url.pinned" : "hub.url.auto",
       }
     );
+
+    // Failover candidate list (if configured) so the user can see at a glance
+    // which peers are reachable and which one was elected.
+    const probe = this.probe();
+    if (probe && probe.probes.length > 1) {
+      nodes.push({
+        key: "candidates",
+        label: probe.pinned ? "Pinned" : "Failover candidates",
+        description: `${probe.probes.filter((p) => p.ok).length} / ${probe.probes.length} reachable`,
+        icon: probe.pinned ? "pin" : "list-tree",
+        tooltip: new vscode.MarkdownString(
+          probe.probes
+            .map((p) => {
+              const tag = p.ok ? `up ${formatUptime(p.uptime)}` : `down: ${(p.error ?? "").slice(0, 80)}`;
+              const star = p.url === probe.activeUrl ? " **(active)**" : "";
+              const lab = p.label ? ` _${p.label}_` : "";
+              return `- \`${p.url}\` (prio ${p.priority ?? 100})${lab} \u2014 ${tag}${star}`;
+            })
+            .join("\n")
+        ).value,
+        contextValue: "hub.candidates",
+      });
+    }
 
     try {
       const h = await c.healthz();
@@ -109,6 +148,12 @@ export class HubProvider implements vscode.TreeDataProvider<HubNode> {
           label: "Status",
           description: h.status,
           icon: h.status === "ok" ? "pass-filled" : "warning",
+        },
+        {
+          key: "uptime",
+          label: "Uptime",
+          description: formatUptime(h.uptime_seconds),
+          icon: "watch",
         },
         {
           key: "version",
@@ -461,4 +506,16 @@ function runnerContext(r: RunnerInfo, isLocal: boolean): string {
   const state = r.state || "unknown";
   const where = isLocal ? "local" : "remote";
   return `runner.${state}.${where}`;
+}
+
+function formatUptime(seconds: number | undefined): string {
+  if (seconds === undefined || seconds === null || !isFinite(seconds) || seconds < 0) return "?";
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = Math.floor(seconds % 60);
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
 }
