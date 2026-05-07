@@ -166,6 +166,35 @@ class BlackboardClient:
         assert result is not None
         return result
 
+    async def fetch_snapshot(self) -> tuple[bytes, dict[str, str]]:
+        """Pull an atomic SQLite snapshot from the active hub.
+
+        Returns ``(body, headers)`` so callers can stamp the snapshot with the
+        ``X-Snapshot-Generated-At`` / ``X-Hub-Started-At`` metadata when
+        persisting it.
+        """
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                response = await self._client.request("GET", "/state/snapshot")
+                break
+            except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError) as exc:
+                last_exc = exc
+                if attempt == 2:
+                    raise BlackboardError(0, f"transport error after 3 attempts: {exc}") from exc
+                await asyncio.sleep(0.5 * (2 ** attempt))
+        if response.status_code >= 400:
+            raise BlackboardError(response.status_code, response.text)
+        return response.content, dict(response.headers)
+
+    async def import_snapshot(self, blob: bytes, *, force: bool = False) -> dict[str, Any]:
+        headers = {"x-force": "1"} if force else {}
+        response = await self._client.request(
+            "POST", "/state/import", content=blob, headers=headers
+        )
+        if response.status_code >= 400:
+            raise BlackboardError(response.status_code, response.text)
+        return response.json()
     async def drain_runner_signed(
         self, runner_id: str, payload: dict[str, Any]
     ) -> dict[str, Any]:

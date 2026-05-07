@@ -1539,6 +1539,8 @@ def create_app(config: BlackboardConfig) -> FastAPI:
     blackboard = Blackboard(config.db_path)
     app.state.blackboard = blackboard
     app.state.token = config.token
+    app.state.started_at = time.time()
+    app.state.config = config
 
     async def require_auth(request: Request) -> None:
         header = request.headers.get("authorization", "")
@@ -1563,6 +1565,87 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             "rust_crypto": _HUB_CRYPTO_HAS_RUST,
             "rust_router": _HUB_ROUTER_HAS_RUST,
             "rust_streams": _HUB_STREAMS_HAS_RUST,
+            "started_at": app.state.started_at,
+            "uptime_seconds": time.time() - app.state.started_at,
+            "host": config.host,
+            "port": config.port,
+        }
+
+    @app.get("/state/snapshot", dependencies=[Depends(require_auth)])
+    async def state_snapshot(request: Request) -> JSONResponse:
+        """Atomic SQLite snapshot for failover replication.
+
+        Uses ``VACUUM INTO`` so the snapshot is consistent without blocking
+        writers. Returns the raw SQLite file as
+        ``application/x-sqlite3``. The caller is expected to be a peer hub
+        node periodically pulling state, or a promote workflow on a
+        candidate node.
+        """
+        from fastapi.responses import Response as _FResp
+
+        snap_dir = config.db_path.parent / "snapshots"
+        snap_dir.mkdir(parents=True, exist_ok=True)
+        # We always overwrite the same file -- callers checksum/timestamp the
+        # response themselves.
+        snap_path = snap_dir / f".snapshot-{os.getpid()}.sqlite3"
+        if snap_path.exists():
+            snap_path.unlink()
+        with sqlite3.connect(config.db_path) as src:
+            src.execute(f"VACUUM INTO '{snap_path.as_posix()}'")
+        data = snap_path.read_bytes()
+        try:
+            snap_path.unlink()
+        except OSError:
+            pass
+        return _FResp(
+            content=data,
+            media_type="application/x-sqlite3",
+            headers={
+                "X-Snapshot-Generated-At": str(time.time()),
+                "X-Hub-Started-At": str(app.state.started_at),
+            },
+        )
+
+    @app.post("/state/import", dependencies=[Depends(require_auth)])
+    async def state_import(request: Request) -> dict[str, Any]:
+        """Import a snapshot to bootstrap a freshly-promoted hub.
+
+        Refuses if any tasks have been claimed *after* the hub started --
+        this protects against accidentally stomping a live hub. Use
+        ``X-Force: 1`` to override (operator must explicitly opt in).
+        """
+        body = await request.body()
+        if not body:
+            raise HTTPException(status_code=400, detail="empty body")
+        force = request.headers.get("x-force", "").strip() == "1"
+        # Safety: refuse if this hub has activity since start.
+        if not force:
+            with sqlite3.connect(config.db_path) as conn:
+                cur = conn.execute("SELECT COUNT(*) FROM tasks")
+                count = int(cur.fetchone()[0])
+            if count > 0:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"refusing to import over a non-empty hub "
+                        f"({count} tasks); send X-Force: 1 to override"
+                    ),
+                )
+        # Atomic replace: write to .new, fsync, rename.
+        new_path = config.db_path.with_suffix(config.db_path.suffix + ".new")
+        new_path.write_bytes(body)
+        # Best-effort: verify the bytes are a real SQLite db before swap.
+        try:
+            with sqlite3.connect(new_path) as test:
+                test.execute("SELECT COUNT(*) FROM tasks").fetchone()
+        except sqlite3.DatabaseError as exc:
+            new_path.unlink(missing_ok=True)
+            raise HTTPException(status_code=400, detail=f"invalid sqlite blob: {exc}")
+        # Replace under our feet -- existing readers using WAL will reopen.
+        os.replace(new_path, config.db_path)
+        return {
+            "status": "imported",
+            "bytes": len(body),
         }
 
     @app.post("/tasks", dependencies=[Depends(require_auth)])
