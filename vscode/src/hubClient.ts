@@ -123,6 +123,14 @@ export class HubClient {
     });
   }
 
+  async drainRunner(runnerId: string): Promise<RunnerInfo> {
+    return this.request<RunnerInfo>("POST", `/runners/${encodeURIComponent(runnerId)}/drain-by-dispatcher`, {});
+  }
+
+  async undrainRunner(runnerId: string): Promise<RunnerInfo> {
+    return this.request<RunnerInfo>("POST", `/runners/${encodeURIComponent(runnerId)}/undrain-by-dispatcher`, {});
+  }
+
   async listRunners(): Promise<RunnerInfo[]> {
     const j = await this.request<{ runners: RunnerInfo[] }>("GET", "/runners");
     return j.runners ?? [];

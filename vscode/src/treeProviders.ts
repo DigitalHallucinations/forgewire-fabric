@@ -1,3 +1,4 @@
+import * as os from "os";
 import * as vscode from "vscode";
 import { HubClient, RunnerInfo, TaskInfo } from "./hubClient";
 
@@ -154,7 +155,8 @@ export class HubProvider implements vscode.TreeDataProvider<HubNode> {
     item.id = `hub:${n.key}`;
     item.description = n.description;
     if (n.icon) {
-      item.iconPath = new vscode.ThemeIcon(n.icon);
+      const color = hubIconColor(n.key, n.description, n.icon);
+      item.iconPath = color ? new vscode.ThemeIcon(n.icon, color) : new vscode.ThemeIcon(n.icon);
     }
     if (n.tooltip) {
       item.tooltip = n.tooltip;
@@ -165,6 +167,30 @@ export class HubProvider implements vscode.TreeDataProvider<HubNode> {
     item.contextValue = n.contextValue ?? `hub.${n.key}`;
     return item;
   }
+}
+
+function hubIconColor(key: string, description: string | undefined, icon: string): vscode.ThemeColor | undefined {
+  if (key === "status") {
+    if (description === "ok") {
+      return new vscode.ThemeColor("charts.green");
+    }
+    return new vscode.ThemeColor("charts.red");
+  }
+  if (key === "state" && icon === "debug-disconnect") {
+    return new vscode.ThemeColor("charts.red");
+  }
+  if (key === "runners" && description) {
+    // "<online> online / <total> total"
+    const m = /^(\d+)\s+online\s+\/\s+(\d+)/.exec(description);
+    if (m) {
+      const online = Number(m[1]);
+      const total = Number(m[2]);
+      if (online === 0) return new vscode.ThemeColor("charts.red");
+      if (online < total) return new vscode.ThemeColor("charts.yellow");
+      return new vscode.ThemeColor("charts.green");
+    }
+  }
+  return undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -217,15 +243,15 @@ export class RunnersProvider implements vscode.TreeDataProvider<RunnerNode> {
       const label = alias || r.hostname || r.runner_id.slice(0, 8);
       const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.Collapsed);
       item.id = `runner:${r.runner_id}`;
-      item.contextValue = "runner";
-      item.description = r.state;
-      item.iconPath = new vscode.ThemeIcon(
-        r.state === "online" ? "circle-filled" : r.state === "draining" ? "circle-slash" : "circle-outline"
-      );
+      const isLocal = !!r.hostname && r.hostname.toLowerCase() === os.hostname().toLowerCase();
+      item.contextValue = runnerContext(r, isLocal);
+      item.description = isLocal ? `${r.state} \u00b7 this host` : r.state;
+      item.iconPath = runnerIcon(r.state, isLocal);
       const tags = (r.tags ?? []).join(", ") || "<no tags>";
       const scopes = (r.scope_prefixes ?? []).join(", ") || "<unscoped>";
       item.tooltip = new vscode.MarkdownString(
         (alias ? `**${alias}**  \u00b7  hostname: ${r.hostname}\n\n` : `**${r.hostname}**\n\n`) +
+          (isLocal ? "_(this host)_\n\n" : "") +
           `- runner_id: \`${r.runner_id}\`\n- state: ${r.state}\n- os: ${r.os} (${r.arch})\n- tags: ${tags}\n- scope: ${scopes}\n` +
           `- last heartbeat: ${r.last_heartbeat ?? "?"}\n- load: ${r.current_load}/${r.max_concurrent}`
       );
@@ -407,4 +433,32 @@ function statusIcon(s: string): string {
     default:
       return "circle-outline";
   }
+}
+
+function runnerIcon(state: string, isLocal: boolean): vscode.ThemeIcon {
+  // Blue dot for "this host" trumps state-color so the user can spot
+  // their own machine at a glance. The state still shows in the
+  // description text + tooltip.
+  if (isLocal) {
+    return new vscode.ThemeIcon("circle-filled", new vscode.ThemeColor("charts.blue"));
+  }
+  switch (state) {
+    case "online":
+      return new vscode.ThemeIcon("circle-filled", new vscode.ThemeColor("charts.green"));
+    case "draining":
+      return new vscode.ThemeIcon("debug-pause", new vscode.ThemeColor("charts.yellow"));
+    case "degraded":
+      return new vscode.ThemeIcon("warning", new vscode.ThemeColor("charts.orange"));
+    case "offline":
+      return new vscode.ThemeIcon("circle-filled", new vscode.ThemeColor("charts.red"));
+    default:
+      return new vscode.ThemeIcon("circle-outline", new vscode.ThemeColor("charts.foreground"));
+  }
+}
+
+function runnerContext(r: RunnerInfo, isLocal: boolean): string {
+  // Drives `view/item/context` `when` clauses: e.g. viewItem == runner.online.local
+  const state = r.state || "unknown";
+  const where = isLocal ? "local" : "remote";
+  return `runner.${state}.${where}`;
 }

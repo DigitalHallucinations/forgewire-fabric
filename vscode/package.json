@@ -2,7 +2,7 @@
   "name": "forgewire-fabric",
   "displayName": "ForgeWire Fabric",
   "description": "Dispatch tasks to a ForgeWire Fabric compute mesh: signed envelopes, scope-bound capability tokens, live stream output. Run a hub or runner from inside VS Code on Windows, macOS, or Linux.",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "publisher": "DigitalHallucinations",
   "license": "Apache-2.0",
   "icon": "media/icon.png",
@@ -169,6 +169,35 @@
         "title": "Rename Runner…",
         "category": "ForgeWire Fabric",
         "icon": "$(edit)"
+      },
+      {
+        "command": "forgewireFabric.pauseRunner",
+        "title": "Pause Runner (drain)",
+        "category": "ForgeWire Fabric",
+        "icon": "$(debug-pause)"
+      },
+      {
+        "command": "forgewireFabric.resumeRunner",
+        "title": "Resume Runner",
+        "category": "ForgeWire Fabric",
+        "icon": "$(debug-start)"
+      },
+      {
+        "command": "forgewireFabric.restartRunnerService",
+        "title": "Restart Runner Service (local)",
+        "category": "ForgeWire Fabric",
+        "icon": "$(debug-restart)"
+      },
+      {
+        "command": "forgewireFabric.startRunnerService",
+        "title": "Start Runner Service (local)",
+        "category": "ForgeWire Fabric"
+      },
+      {
+        "command": "forgewireFabric.stopRunnerService",
+        "title": "Stop Runner Service (local)",
+        "category": "ForgeWire Fabric",
+        "icon": "$(debug-stop)"
       }
     ],
     "viewsContainers": {
@@ -250,8 +279,33 @@
         },
         {
           "command": "forgewireFabric.renameRunner",
-          "when": "view == forgewireFabric.runners && viewItem == runner",
+          "when": "view == forgewireFabric.runners && viewItem =~ /^runner\\./",
           "group": "inline@1"
+        },
+        {
+          "command": "forgewireFabric.pauseRunner",
+          "when": "view == forgewireFabric.runners && viewItem =~ /^runner\\.online\\./",
+          "group": "inline@2"
+        },
+        {
+          "command": "forgewireFabric.resumeRunner",
+          "when": "view == forgewireFabric.runners && viewItem =~ /^runner\\.draining\\./",
+          "group": "inline@2"
+        },
+        {
+          "command": "forgewireFabric.restartRunnerService",
+          "when": "view == forgewireFabric.runners && viewItem =~ /^runner\\.[a-z]+\\.local$/",
+          "group": "inline@3"
+        },
+        {
+          "command": "forgewireFabric.stopRunnerService",
+          "when": "view == forgewireFabric.runners && viewItem =~ /^runner\\.[a-z]+\\.local$/",
+          "group": "runner@2"
+        },
+        {
+          "command": "forgewireFabric.startRunnerService",
+          "when": "view == forgewireFabric.runners && viewItem =~ /^runner\\.offline\\.local$/",
+          "group": "runner@1"
         },
         {
           "command": "forgewireFabric.streamTask",
@@ -277,6 +331,21 @@
         },
         {
           "command": "forgewireFabric.showTask"
+        },
+        {
+          "command": "forgewireFabric.pauseRunner"
+        },
+        {
+          "command": "forgewireFabric.resumeRunner"
+        },
+        {
+          "command": "forgewireFabric.restartRunnerService"
+        },
+        {
+          "command": "forgewireFabric.startRunnerService"
+        },
+        {
+          "command": "forgewireFabric.stopRunnerService"
         }
       ]
     }

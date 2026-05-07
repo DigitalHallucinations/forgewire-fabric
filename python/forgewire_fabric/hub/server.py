@@ -966,6 +966,26 @@ class Blackboard:
                 raise KeyError(runner_id)
         return self.get_runner(runner_id)
 
+    def request_undrain(self, runner_id: str) -> dict[str, Any]:
+        """Reverse a drain request. Restores state to 'online' so the
+        runner accepts new tasks again on its next heartbeat."""
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE runners
+                SET drain_requested = 0,
+                    state           = CASE
+                        WHEN state = 'draining' THEN 'online'
+                        ELSE state
+                    END
+                WHERE runner_id = ?
+                """,
+                (runner_id,),
+            )
+            if cur.rowcount == 0:
+                raise KeyError(runner_id)
+        return self.get_runner(runner_id)
+
     def runner_public_key(self, runner_id: str) -> str | None:
         with self._connect() as conn:
             row = conn.execute(
@@ -1881,6 +1901,14 @@ def create_app(config: BlackboardConfig) -> FastAPI:
         """Dispatcher-initiated drain. Bearer-only (no runner signature)."""
         try:
             return blackboard.request_drain(runner_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="runner not registered") from exc
+
+    @app.post("/runners/{runner_id}/undrain-by-dispatcher", dependencies=[Depends(require_auth)])
+    async def undrain_runner_by_dispatcher(runner_id: str) -> dict[str, Any]:
+        """Dispatcher-initiated un-drain (resume). Bearer-only."""
+        try:
+            return blackboard.request_undrain(runner_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="runner not registered") from exc
 

@@ -64,7 +64,12 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<void> {
     vscode.commands.registerCommand("forgewireFabric.generateToken", generateToken),
     vscode.commands.registerCommand("forgewireFabric.openSettings", openSettings),
     vscode.commands.registerCommand("forgewireFabric.renameHub", renameHub),
-    vscode.commands.registerCommand("forgewireFabric.renameRunner", renameRunner)
+    vscode.commands.registerCommand("forgewireFabric.renameRunner", renameRunner),
+    vscode.commands.registerCommand("forgewireFabric.pauseRunner", pauseRunner),
+    vscode.commands.registerCommand("forgewireFabric.resumeRunner", resumeRunner),
+    vscode.commands.registerCommand("forgewireFabric.restartRunnerService", restartRunnerService),
+    vscode.commands.registerCommand("forgewireFabric.startRunnerService", startRunnerService),
+    vscode.commands.registerCommand("forgewireFabric.stopRunnerService", stopRunnerService)
   );
 
   ctx.subscriptions.push(
@@ -711,6 +716,147 @@ async function renameRunner(arg?: { runner_id?: string } | string): Promise<void
       `Rename failed: ${err instanceof Error ? err.message : String(err)}`
     );
   }
+}
+
+// ---------------------------------------------------------------------------
+// commands: runner control (pause/resume via hub; start/stop/restart local)
+// ---------------------------------------------------------------------------
+
+interface RunnerArg {
+  runner_id?: string;
+  hostname?: string;
+  state?: string;
+}
+
+function extractRunnerArg(arg: unknown): RunnerArg | undefined {
+  if (!arg) return undefined;
+  if (typeof arg === "string") return { runner_id: arg };
+  if (typeof arg !== "object") return undefined;
+  const a = arg as Record<string, unknown>;
+  // Tree node may wrap the runner under .runner.
+  if (a.kind === "runner" && a.runner && typeof a.runner === "object") {
+    return a.runner as RunnerArg;
+  }
+  return a as RunnerArg;
+}
+
+async function pickRunnerIfMissing(arg: unknown): Promise<RunnerArg | undefined> {
+  const ra = extractRunnerArg(arg);
+  if (ra?.runner_id) return ra;
+  const c = getClient();
+  if (!c) {
+    vscode.window.showWarningMessage("Connect to a hub first.");
+    return undefined;
+  }
+  let runners: RunnerArg[] = [];
+  try {
+    runners = (await c.listRunners()) as RunnerArg[];
+  } catch (err) {
+    vscode.window.showErrorMessage(
+      `Could not list runners: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return undefined;
+  }
+  const labels = await c.getLabels().catch(() => ({ runner_aliases: {} as Record<string, string> }));
+  const aliases = labels.runner_aliases ?? {};
+  const pick = await vscode.window.showQuickPick(
+    runners.map((r) => ({
+      label: aliases[r.runner_id ?? ""] || r.hostname || (r.runner_id ?? "").slice(0, 8),
+      description: r.hostname,
+      detail: `${r.runner_id} \u00b7 ${r.state}`,
+      runner: r,
+    })),
+    { title: "Pick a runner" }
+  );
+  return pick?.runner;
+}
+
+async function pauseRunner(arg?: unknown): Promise<void> {
+  const c = getClient();
+  if (!c) {
+    vscode.window.showWarningMessage("Connect to a hub first.");
+    return;
+  }
+  const r = await pickRunnerIfMissing(arg);
+  if (!r?.runner_id) return;
+  const target = r.hostname ?? r.runner_id.slice(0, 8);
+  const ok = await vscode.window.showWarningMessage(
+    `Pause runner ${target}? It will finish current tasks but stop accepting new ones.`,
+    { modal: true },
+    "Pause"
+  );
+  if (ok !== "Pause") return;
+  try {
+    await c.drainRunner(r.runner_id);
+    vscode.window.showInformationMessage(`Pause requested for ${target}.`);
+    refreshAll();
+  } catch (err) {
+    vscode.window.showErrorMessage(
+      `Pause failed: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+}
+
+async function resumeRunner(arg?: unknown): Promise<void> {
+  const c = getClient();
+  if (!c) {
+    vscode.window.showWarningMessage("Connect to a hub first.");
+    return;
+  }
+  const r = await pickRunnerIfMissing(arg);
+  if (!r?.runner_id) return;
+  const target = r.hostname ?? r.runner_id.slice(0, 8);
+  try {
+    await c.undrainRunner(r.runner_id);
+    vscode.window.showInformationMessage(`Resumed ${target}.`);
+    refreshAll();
+  } catch (err) {
+    vscode.window.showErrorMessage(
+      `Resume failed: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+}
+
+async function localServiceAction(action: "start" | "stop" | "restart", arg?: unknown): Promise<void> {
+  const r = extractRunnerArg(arg);
+  // For local actions we ignore the picker — only act on this host.
+  if (r && r.hostname && r.hostname.toLowerCase() !== os.hostname().toLowerCase()) {
+    vscode.window.showWarningMessage(
+      `Cannot ${action} runner on remote host ${r.hostname} from here. ${action === "start" ? "Start" : action === "stop" ? "Stop" : "Restart"} it on that machine, or use SSH.`
+    );
+    return;
+  }
+  if (process.platform !== "win32") {
+    vscode.window.showWarningMessage(
+      `Local service control is currently only wired for Windows (NSSM). On macOS/Linux, manage the systemd/launchd unit directly.`
+    );
+    return;
+  }
+  const verb = action === "restart" ? "Restart" : action === "start" ? "Start" : "Stop";
+  const ok = await vscode.window.showWarningMessage(
+    `${verb} the local ForgeWireRunner Windows service? You'll get a UAC prompt.`,
+    { modal: true },
+    verb
+  );
+  if (ok !== verb) return;
+  // Use a self-elevating PowerShell one-liner so the user only sees one UAC.
+  const ps = `Start-Process -Verb RunAs -Wait -FilePath nssm.exe -ArgumentList '${action}','ForgeWireRunner'`;
+  const term = getOrCreateTerminal(`ForgeWire Fabric: runner ${action}`);
+  term.show();
+  term.sendText(`powershell -NoProfile -Command "${ps}"`);
+  setTimeout(refreshAll, 4000);
+}
+
+async function restartRunnerService(arg?: unknown): Promise<void> {
+  return localServiceAction("restart", arg);
+}
+
+async function startRunnerService(arg?: unknown): Promise<void> {
+  return localServiceAction("start", arg);
+}
+
+async function stopRunnerService(arg?: unknown): Promise<void> {
+  return localServiceAction("stop", arg);
 }
 
 async function openSettings(): Promise<void> {
