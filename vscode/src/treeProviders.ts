@@ -31,7 +31,7 @@ export class HubProvider implements vscode.TreeDataProvider<HubNode> {
     }
     const c = this.client();
     const cfg = vscode.workspace.getConfiguration("forgewireFabric");
-    const hubName = (cfg.get<string>("hubName") ?? "").trim();
+    let hubName = (cfg.get<string>("hubName") ?? "").trim();
 
     const renameCmd: vscode.Command = {
       command: "forgewireFabric.renameHub",
@@ -68,13 +68,24 @@ export class HubProvider implements vscode.TreeDataProvider<HubNode> {
       ];
     }
 
-    const nodes: HubNode[] = [
+    const nodes: HubNode[] = [];
+
+    try {
+      const labels = await c.getLabels();
+      if (labels.hub_name) {
+        hubName = labels.hub_name;
+      }
+    } catch {
+      /* ignore */
+    }
+
+    nodes.push(
       {
         key: "name",
         label: "Name",
         description: hubName || "(unset)",
         icon: "tag",
-        tooltip: "Click to set a friendly hub name.",
+        tooltip: "Click to rename this hub fabric-wide.",
         command: renameCmd,
         contextValue: "hub.name",
       },
@@ -84,8 +95,8 @@ export class HubProvider implements vscode.TreeDataProvider<HubNode> {
         description: c.url,
         icon: "link",
         tooltip: c.url,
-      },
-    ];
+      }
+    );
 
     try {
       const h = await c.healthz();
@@ -168,6 +179,8 @@ export class RunnersProvider implements vscode.TreeDataProvider<RunnerNode> {
   private readonly _onDidChange = new vscode.EventEmitter<RunnerNode | undefined | void>();
   readonly onDidChangeTreeData = this._onDidChange.event;
 
+  private aliases: Record<string, string> = {};
+
   constructor(private readonly client: () => HubClient | undefined) {}
 
   refresh(): void {
@@ -176,7 +189,7 @@ export class RunnersProvider implements vscode.TreeDataProvider<RunnerNode> {
 
   async getChildren(element?: RunnerNode): Promise<RunnerNode[]> {
     if (element?.kind === "runner") {
-      return runnerProps(element.runner);
+      return runnerProps(element.runner, this.aliases);
     }
     if (element?.kind === "prop") {
       return [];
@@ -186,7 +199,11 @@ export class RunnersProvider implements vscode.TreeDataProvider<RunnerNode> {
       return [];
     }
     try {
-      const runners = await c.listRunners();
+      const [runners, labels] = await Promise.all([
+        c.listRunners(),
+        c.getLabels().catch(() => ({ hub_name: "", runner_aliases: {} })),
+      ]);
+      this.aliases = labels.runner_aliases ?? {};
       return runners.map((r) => ({ kind: "runner" as const, runner: r }));
     } catch {
       return [];
@@ -196,9 +213,7 @@ export class RunnersProvider implements vscode.TreeDataProvider<RunnerNode> {
   getTreeItem(n: RunnerNode): vscode.TreeItem {
     if (n.kind === "runner") {
       const r = n.runner;
-      const cfg = vscode.workspace.getConfiguration("forgewireFabric");
-      const aliases = cfg.get<Record<string, string>>("runnerAliases") ?? {};
-      const alias = aliases[r.runner_id];
+      const alias = this.aliases[r.runner_id];
       const label = alias || r.hostname || r.runner_id.slice(0, 8);
       const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.Collapsed);
       item.id = `runner:${r.runner_id}`;
@@ -226,9 +241,7 @@ export class RunnersProvider implements vscode.TreeDataProvider<RunnerNode> {
   }
 }
 
-function runnerProps(r: RunnerInfo): RunnerNode[] {
-  const cfg = vscode.workspace.getConfiguration("forgewireFabric");
-  const aliases = cfg.get<Record<string, string>>("runnerAliases") ?? {};
+function runnerProps(r: RunnerInfo, aliases: Record<string, string>): RunnerNode[] {
   const alias = aliases[r.runner_id];
   const tags = (r.tags ?? []).join(", ") || "<none>";
   const scopes = (r.scope_prefixes ?? []).join(", ") || "<unscoped>";

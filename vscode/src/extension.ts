@@ -572,80 +572,145 @@ async function showTaskCmd(arg: number | { id: number }): Promise<void> {
 let settingsPanel: vscode.WebviewPanel | undefined;
 
 async function renameHub(): Promise<void> {
-  const cfg = vscode.workspace.getConfiguration("forgewireFabric");
-  const current = (cfg.get<string>("hubName") ?? "").trim();
+  const c = getClient();
+  if (!c) {
+    vscode.window.showWarningMessage("Connect to a hub first \u2014 hub names are stored on the hub and propagate to all connected nodes.");
+    return;
+  }
+  let current = "";
+  try {
+    current = (await c.getLabels()).hub_name ?? "";
+  } catch {
+    /* ignore; allow rename anyway */
+  }
   const name = await vscode.window.showInputBox({
-    title: "Hub display name",
-    prompt: "A friendly name for this hub (shown in the sidebar and status bar). Leave blank to clear.",
+    title: "Hub display name (fabric-wide)",
+    prompt: "Friendly name for this hub. Leave blank to clear.",
     value: current,
     ignoreFocusOut: true,
+    validateInput: (v) => (v.length <= 80 ? null : "Max 80 chars"),
   });
   if (name === undefined) {
     return;
   }
-  await cfg.update("hubName", name.trim(), vscode.ConfigurationTarget.Global);
-  updateStatus();
-  refreshAll();
+  const trimmed = name.trim();
+  const verb = trimmed === "" ? "clear the hub name" : `rename this hub to "${trimmed}"`;
+  const ok = await vscode.window.showWarningMessage(
+    `This will ${verb} for every node connected to ${labelForUrl(c.url)}.\n\n` +
+      `The change is stored on the hub and propagates to all clients on their next refresh. Continue?`,
+    { modal: true },
+    "Apply Fabric-Wide"
+  );
+  if (ok !== "Apply Fabric-Wide") {
+    return;
+  }
+  try {
+    await c.setHubName(trimmed, os.hostname());
+    vscode.window.showInformationMessage(
+      trimmed === ""
+        ? "Hub name cleared fabric-wide."
+        : `Hub renamed to "${trimmed}" fabric-wide.`
+    );
+    updateStatus();
+    refreshAll();
+  } catch (err) {
+    vscode.window.showErrorMessage(
+      `Hub rename failed: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
 }
 
 async function renameRunner(arg?: { runner_id?: string } | string): Promise<void> {
   const c = getClient();
+  if (!c) {
+    vscode.window.showWarningMessage("Connect to a hub first \u2014 runner aliases are stored on the hub and propagate to all connected nodes.");
+    return;
+  }
   let runnerId: string | undefined;
+  let runnerHost: string | undefined;
   if (typeof arg === "string") {
     runnerId = arg;
   } else if (arg && typeof arg === "object" && typeof (arg as { runner_id?: string }).runner_id === "string") {
     runnerId = (arg as { runner_id: string }).runner_id;
+    runnerHost = (arg as { hostname?: string }).hostname;
   }
+
+  let runners: { runner_id: string; hostname: string }[] = [];
+  try {
+    runners = (await c.listRunners()) as { runner_id: string; hostname: string }[];
+  } catch (err) {
+    vscode.window.showErrorMessage(
+      `Could not list runners: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return;
+  }
+  let labels: Record<string, string> = {};
+  try {
+    labels = (await c.getLabels()).runner_aliases ?? {};
+  } catch {
+    /* ignore */
+  }
+
   if (!runnerId) {
-    if (!c) {
-      vscode.window.showWarningMessage("Connect to a hub first.");
-      return;
-    }
-    let runners: { runner_id: string; hostname: string }[] = [];
-    try {
-      runners = (await c.listRunners()) as { runner_id: string; hostname: string }[];
-    } catch (err) {
-      vscode.window.showErrorMessage(
-        `Could not list runners: ${err instanceof Error ? err.message : String(err)}`
-      );
-      return;
-    }
-    const cfg = vscode.workspace.getConfiguration("forgewireFabric");
-    const aliases = cfg.get<Record<string, string>>("runnerAliases") ?? {};
     const pick = await vscode.window.showQuickPick(
       runners.map((r) => ({
-        label: aliases[r.runner_id] || r.hostname || r.runner_id.slice(0, 8),
+        label: labels[r.runner_id] || r.hostname || r.runner_id.slice(0, 8),
         description: r.hostname,
         detail: r.runner_id,
         runner_id: r.runner_id,
+        hostname: r.hostname,
       })),
-      { title: "Pick a runner to rename" }
+      { title: "Pick a runner to rename (fabric-wide)" }
     );
     if (!pick) {
       return;
     }
     runnerId = pick.runner_id;
+    runnerHost = pick.hostname;
+  } else if (!runnerHost) {
+    runnerHost = runners.find((r) => r.runner_id === runnerId)?.hostname;
   }
 
-  const cfg = vscode.workspace.getConfiguration("forgewireFabric");
-  const aliases = { ...(cfg.get<Record<string, string>>("runnerAliases") ?? {}) };
-  const currentAlias = aliases[runnerId] ?? "";
+  const isThisHost = !!runnerHost && runnerHost.toLowerCase() === os.hostname().toLowerCase();
+  const currentAlias = labels[runnerId] ?? "";
   const next = await vscode.window.showInputBox({
-    title: `Alias for runner ${runnerId.slice(0, 8)}`,
-    prompt: "Friendly name for this runner. Leave blank to clear the alias.",
+    title: `Alias for runner ${runnerHost ?? runnerId.slice(0, 8)} (fabric-wide)`,
+    prompt: "Friendly name for this runner. Leave blank to clear.",
     value: currentAlias,
     ignoreFocusOut: true,
+    validateInput: (v) => (v.length <= 80 ? null : "Max 80 chars"),
   });
   if (next === undefined) {
     return;
   }
-  if (next.trim()) {
-    aliases[runnerId] = next.trim();
-  } else {
-    delete aliases[runnerId];
+  const trimmed = next.trim();
+  const target = runnerHost ?? runnerId.slice(0, 8);
+  const verb = trimmed === "" ? `clear the alias for ${target}` : `alias ${target} as "${trimmed}"`;
+  const sameNodeNote = isThisHost
+    ? ""
+    : `\n\nNote: you are renaming a runner on a different node (${target}). `;
+  const ok = await vscode.window.showWarningMessage(
+    `This will ${verb} for every node connected to ${labelForUrl(c.url)}.${sameNodeNote}\n\n` +
+      `The change is stored on the hub and propagates to all clients on their next refresh. Continue?`,
+    { modal: true },
+    "Apply Fabric-Wide"
+  );
+  if (ok !== "Apply Fabric-Wide") {
+    return;
   }
-  await cfg.update("runnerAliases", aliases, vscode.ConfigurationTarget.Global);
-  refreshAll();
+  try {
+    await c.setRunnerAlias(runnerId, trimmed, os.hostname());
+    vscode.window.showInformationMessage(
+      trimmed === ""
+        ? `Cleared alias for ${target} fabric-wide.`
+        : `Aliased ${target} as "${trimmed}" fabric-wide.`
+    );
+    refreshAll();
+  } catch (err) {
+    vscode.window.showErrorMessage(
+      `Rename failed: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
 }
 
 async function openSettings(): Promise<void> {

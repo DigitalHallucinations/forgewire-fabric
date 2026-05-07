@@ -229,6 +229,68 @@ class Blackboard:
             """
         )
 
+        # Fabric-wide cosmetic labels: hub display name + per-runner aliases.
+        # These are scoped to the hub (one row per logical key) and propagate
+        # to every connected client. No effect on identity, auth, or routing.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS labels (
+                key         TEXT PRIMARY KEY,
+                value       TEXT NOT NULL,
+                updated_by  TEXT,
+                updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            """
+        )
+
+    # ----------------------------------------------------------------- labels
+
+    def get_labels(self) -> dict[str, Any]:
+        """Return the fabric-wide label payload: hub_name + runner_aliases."""
+        with self._connect() as conn:
+            rows = conn.execute("SELECT key, value FROM labels").fetchall()
+        hub_name = ""
+        aliases: dict[str, str] = {}
+        for r in rows:
+            k = r["key"]
+            v = r["value"]
+            if k == "hub_name":
+                hub_name = v
+            elif k.startswith("runner_alias:"):
+                aliases[k[len("runner_alias:") :]] = v
+        return {"hub_name": hub_name, "runner_aliases": aliases}
+
+    def set_hub_name(self, name: str, *, updated_by: str | None = None) -> None:
+        self._upsert_label("hub_name", name, updated_by)
+
+    def set_runner_alias(
+        self,
+        runner_id: str,
+        alias: str,
+        *,
+        updated_by: str | None = None,
+    ) -> None:
+        self._upsert_label(f"runner_alias:{runner_id}", alias, updated_by)
+
+    def _upsert_label(self, key: str, value: str, updated_by: str | None) -> None:
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if value == "":
+                conn.execute("DELETE FROM labels WHERE key = ?", (key,))
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO labels (key, value, updated_by, updated_at)
+                    VALUES (?, ?, ?, datetime('now'))
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = excluded.value,
+                        updated_by = excluded.updated_by,
+                        updated_at = excluded.updated_at
+                    """,
+                    (key, value, updated_by),
+                )
+            conn.commit()
+
     # ----------------------------------------------------------------- tasks
 
     def create_task(
@@ -1747,6 +1809,29 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             "hub_protocol_version": PROTOCOL_VERSION,
             "runners": blackboard.list_runners(),
         }
+
+    # -- labels (cosmetic, fabric-wide) ----------------------------------
+    @app.get("/labels", dependencies=[Depends(require_auth)])
+    async def get_labels() -> dict[str, Any]:
+        return blackboard.get_labels()
+
+    @app.put("/labels/hub", dependencies=[Depends(require_auth)])
+    async def set_hub_label(payload: dict[str, Any]) -> dict[str, Any]:
+        name = str(payload.get("name", "")).strip()
+        if len(name) > 80:
+            raise HTTPException(status_code=400, detail="hub name max 80 chars")
+        updated_by = str(payload.get("updated_by", "") or "")[:80] or None
+        blackboard.set_hub_name(name, updated_by=updated_by)
+        return blackboard.get_labels()
+
+    @app.put("/labels/runners/{runner_id}", dependencies=[Depends(require_auth)])
+    async def set_runner_label(runner_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        alias = str(payload.get("alias", "")).strip()
+        if len(alias) > 80:
+            raise HTTPException(status_code=400, detail="runner alias max 80 chars")
+        updated_by = str(payload.get("updated_by", "") or "")[:80] or None
+        blackboard.set_runner_alias(runner_id, alias, updated_by=updated_by)
+        return blackboard.get_labels()
 
     @app.post("/runners/{runner_id}/heartbeat", dependencies=[Depends(require_auth)])
     async def heartbeat_runner(runner_id: str, payload: HeartbeatRequest) -> dict[str, Any]:

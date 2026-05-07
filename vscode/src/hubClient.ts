@@ -104,6 +104,25 @@ export class HubClient {
     return this.request("GET", "/healthz");
   }
 
+  async getLabels(): Promise<{ hub_name: string; runner_aliases: Record<string, string> }> {
+    try {
+      return await this.request("GET", "/labels");
+    } catch {
+      return { hub_name: "", runner_aliases: {} };
+    }
+  }
+
+  async setHubName(name: string, updatedBy?: string): Promise<void> {
+    await this.request("PUT", "/labels/hub", { name, updated_by: updatedBy ?? "" });
+  }
+
+  async setRunnerAlias(runnerId: string, alias: string, updatedBy?: string): Promise<void> {
+    await this.request("PUT", `/labels/runners/${encodeURIComponent(runnerId)}`, {
+      alias,
+      updated_by: updatedBy ?? "",
+    });
+  }
+
   async listRunners(): Promise<RunnerInfo[]> {
     const j = await this.request<{ runners: RunnerInfo[] }>("GET", "/runners");
     return j.runners ?? [];
