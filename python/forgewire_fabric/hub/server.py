@@ -35,6 +35,7 @@ import logging
 import os
 import secrets
 import sqlite3
+import sys
 import time
 import calendar
 from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
@@ -2352,6 +2353,54 @@ def create_app(config: BlackboardConfig) -> FastAPI:
                 await asyncio.sleep(PROGRESS_POLL_SECONDS)
 
         return EventSourceResponse(stream())
+
+    # -- Resilience: fast-exit on fatal socket / accept-loop failures so that
+    #    the service supervisor (NSSM / systemd / launchd) restarts us. On
+    #    Windows IOCP we have observed `OSError: [WinError 64]` propagating
+    #    out of `accept_coro` and silently killing the listening socket while
+    #    the process keeps running. That state is invisible to the supervisor
+    #    and produces "service running, hub unreachable". Convert any such
+    #    fatal asyncio exception into a hard process exit; the supervisor
+    #    will bring us back within seconds.
+    @app.on_event("startup")
+    async def _install_loop_watchdog() -> None:  # pragma: no cover - runtime
+        loop = asyncio.get_running_loop()
+        log = logging.getLogger("forgewire_fabric.hub.watchdog")
+        prev = loop.get_exception_handler()
+
+        def _fatal(message: str, exc: BaseException | None) -> bool:
+            text = (message or "").lower()
+            if "accept failed" in text or "accept_coro" in text:
+                return True
+            if isinstance(exc, OSError):
+                # WinError 64 / 121 / 1236 — listening socket has been torn
+                # down by the OS; we cannot recover without re-binding.
+                return getattr(exc, "winerror", None) in {64, 121, 1236}
+            return False
+
+        def _handler(_loop: asyncio.AbstractEventLoop, ctx: dict) -> None:
+            msg = str(ctx.get("message", ""))
+            exc = ctx.get("exception")
+            if _fatal(msg, exc if isinstance(exc, BaseException) else None):
+                log.critical(
+                    "fatal asyncio failure, exiting for supervisor restart: "
+                    "msg=%r exc=%r",
+                    msg, exc,
+                )
+                # Flush stdio before bailing.
+                try:
+                    sys.stdout.flush()
+                    sys.stderr.flush()
+                except Exception:
+                    pass
+                os._exit(75)  # EX_TEMPFAIL
+            if prev is not None:
+                prev(_loop, ctx)
+            else:
+                _loop.default_exception_handler(ctx)
+
+        loop.set_exception_handler(_handler)
+        log.info("loop watchdog installed (fatal-exit on accept failures)")
 
     return app
 
