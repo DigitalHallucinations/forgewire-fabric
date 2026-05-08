@@ -179,20 +179,49 @@ function Invoke-Query {
     }
 }
 
-# Stop or start a voter's Windows service. ssh_alias='local' (or empty)
-# means in-process; otherwise dispatch over SSH.
+# Stop or start a voter's Windows service. We auto-detect whether the
+# voter's host is local to this machine by comparing voter.host to this
+# host's IPv4 addresses. If local, run Stop-/Start-Service in-process;
+# otherwise dispatch over SSH using voter.ssh_alias. The 'local' string
+# in cluster.yaml is also honoured for backwards compatibility.
+$script:_localIPs = $null
+function Get-LocalIPv4Set {
+    if ($null -ne $script:_localIPs) { return $script:_localIPs }
+    $set = @{}
+    try {
+        Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+            ForEach-Object { $set[$_.IPAddress] = $true }
+    } catch {}
+    $set['127.0.0.1'] = $true
+    $set['localhost'] = $true
+    $script:_localIPs = $set
+    return $set
+}
+
+function Test-VoterIsLocal {
+    param($Voter)
+    $alias = if ($Voter.ssh_alias) { [string]$Voter.ssh_alias } else { '' }
+    if ($alias -ieq 'local') { return $true }
+    $local = Get-LocalIPv4Set
+    if ($Voter.host -and $local.ContainsKey([string]$Voter.host)) { return $true }
+    return $false
+}
+
 function Invoke-VoterService {
     param([Parameter(Mandatory)]$Voter, [Parameter(Mandatory)][ValidateSet('Stop','Start')] [string]$Action)
     if (-not $Voter.service) {
         throw "voter $($Voter.label) has no 'service' configured in cluster.yaml"
     }
-    $alias = if ($Voter.ssh_alias) { [string]$Voter.ssh_alias } else { 'local' }
-    $isLocal = ($alias -ieq 'local' -or $alias -eq '')
+    $isLocal = Test-VoterIsLocal -Voter $Voter
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
     if ($isLocal) {
         if ($Action -eq 'Stop') { Stop-Service -Name $Voter.service -ErrorAction Stop }
         else { Start-Service -Name $Voter.service -ErrorAction Stop }
     } else {
+        $alias = [string]$Voter.ssh_alias
+        if (-not $alias -or $alias -ieq 'local') {
+            throw "voter $($Voter.label) host=$($Voter.host) is not local and has no ssh_alias"
+        }
         $cmd = if ($Action -eq 'Stop') { "Stop-Service $($Voter.service)" } else { "Start-Service $($Voter.service)" }
         $remote = "powershell -NoProfile -Command `"$cmd`""
         & ssh $alias $remote 2>&1 | Out-Null

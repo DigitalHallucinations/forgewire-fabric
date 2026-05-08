@@ -59,7 +59,11 @@ voters:
     priority: 3
     tags: [secondary, dell]
     service: ForgeWireRqliteNode2
-    ssh_alias: local
+    # ssh_alias left empty: chaos_drills.ps1 auto-detects this voter as
+    # local on Dell by IP match. From any other driver host you must set
+    # ssh_alias to an alias that reaches Dell, otherwise drills that
+    # target node2 will be skipped with an error logged to JSONL.
+    ssh_alias: ''
 
 # Preferred control node for outbound operations issued *from this host*.
 # Override per-machine with the FORGEWIRE_PREFERRED_NODE env var or the
