@@ -184,8 +184,12 @@ if (-not $svc) {
         $stale = $true
         $ageSeconds = $null
         try {
-            $hb = [DateTime]::Parse($entry.last_heartbeat, $null, [System.Globalization.DateTimeStyles]::RoundtripKind)
-            $ageSeconds = [int]((Get-Date).ToUniversalTime() - $hb.ToUniversalTime()).TotalSeconds
+            # Parse via DateTimeOffset so the 'Z' (or any +HH:MM) suffix the
+            # hub emits is honoured. [DateTime]::Parse silently coerces ISO
+            # 'Z' strings into local-kind DateTime on some Windows locales,
+            # producing a 5- to 8-hour offset error vs (Get-Date).ToUniversalTime().
+            $hbUtc = [DateTimeOffset]::Parse($entry.last_heartbeat).UtcDateTime
+            $ageSeconds = [int]((Get-Date).ToUniversalTime() - $hbUtc).TotalSeconds
             $stale = $ageSeconds -gt $StalenessSeconds
         } catch {}
 
