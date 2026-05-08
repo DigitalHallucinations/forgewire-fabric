@@ -85,6 +85,22 @@ if (-not $KeySource) {
 if ($KeySource.StartsWith('~')) {
     $KeySource = Join-Path $env:USERPROFILE $KeySource.Substring(2)
 }
+# When invoked from a SYSTEM-scoped scheduled task, $env:USERPROFILE points at
+# C:\Windows\system32\config\systemprofile, which never holds the operator's
+# key. Fall back to scanning C:\Users\*\.ssh\<basename> for the first match.
+if (-not (Test-Path -LiteralPath $KeySource)) {
+    $basename = Split-Path -Leaf $KeySource
+    $usersRoot = Join-Path $env:SystemDrive 'Users'
+    if (Test-Path -LiteralPath $usersRoot) {
+        $candidates = Get-ChildItem -LiteralPath $usersRoot -Directory -ErrorAction SilentlyContinue |
+            ForEach-Object { Join-Path $_.FullName ".ssh\$basename" } |
+            Where-Object { Test-Path -LiteralPath $_ }
+        if ($candidates) {
+            Write-Host "Key not found at expanded path; using $($candidates[0])" -ForegroundColor DarkYellow
+            $KeySource = $candidates[0]
+        }
+    }
+}
 $KeySource = (Resolve-Path -LiteralPath $KeySource -ErrorAction Stop).Path
 $keyPub = "$KeySource.pub"
 if (-not (Test-Path $keyPub)) {
