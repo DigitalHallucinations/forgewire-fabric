@@ -42,6 +42,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -53,6 +54,7 @@ from forgewire_fabric.hub._router import HAS_RUST as _HUB_ROUTER_HAS_RUST
 from forgewire_fabric.hub._router import pick_task as _router_pick_task
 from forgewire_fabric.hub._streams import HAS_RUST as _HUB_STREAMS_HAS_RUST
 from forgewire_fabric.hub._streams import make_counter as _make_stream_counter
+from forgewire_fabric.hub import _rqlite_db
 
 LOGGER = logging.getLogger("forgewire_fabric.hub")
 
@@ -121,6 +123,20 @@ class BlackboardConfig:
     port: int
     min_runner_version: str = DEFAULT_MIN_RUNNER_VERSION
     require_signed_dispatch: bool = False
+    # Phase 2 (rqlite migration): "sqlite" keeps the legacy single-node
+    # WAL backend (default for backward compat); "rqlite" routes all
+    # statements to the rqlite cluster over HTTP. The two backends share
+    # the same Blackboard call surface; the only divergence is in the
+    # state-snapshot endpoint, which uses VACUUM INTO under sqlite and
+    # rqlite's /db/backup under rqlite. Under "rqlite" the /state/snapshot
+    # and /state/import endpoints are PARITY-ONLY exit hatches -- routine
+    # DR is handled by the cluster itself (see
+    # docs/operations/dr-rqlite-backups.md and
+    # docs/operations/state-endpoints-parity.md).
+    backend: str = "sqlite"
+    rqlite_host: str = "127.0.0.1"
+    rqlite_port: int = 4001
+    rqlite_consistency: str = "strong"
 
 
 class Blackboard:
@@ -130,34 +146,55 @@ class Blackboard:
     procedural -- this module is the boundary, no business logic should leak in.
     """
 
-    def __init__(self, db_path: Path) -> None:
+    def __init__(
+        self,
+        db_path: Path,
+        *,
+        backend: str = "sqlite",
+        rqlite_host: str = "127.0.0.1",
+        rqlite_port: int = 4001,
+        rqlite_consistency: str = "strong",
+    ) -> None:
+        if backend not in ("sqlite", "rqlite"):
+            raise ValueError(f"unknown backend {backend!r}")
+        self._backend = backend
+        self._rqlite_host = rqlite_host
+        self._rqlite_port = rqlite_port
+        self._rqlite_consistency = rqlite_consistency
         self._db_path = db_path
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        # One-shot legacy migration: if the operator hasn't pointed
-        # FORGEWIRE_HUB_DB_PATH anywhere and the canonical path doesn't
-        # exist yet, but a PhrenForge-era ~/.phrenforge/remote_subagent.sqlite3
-        # does, copy it across so existing fleets keep their task history.
-        if (
-            db_path == DEFAULT_DB
-            and not db_path.exists()
-            and _LEGACY_DEFAULT_DB.exists()
-        ):
-            try:
-                import shutil
+        if backend == "sqlite":
+            self._db_path.parent.mkdir(parents=True, exist_ok=True)
+            # One-shot legacy migration: if the operator hasn't pointed
+            # FORGEWIRE_HUB_DB_PATH anywhere and the canonical path doesn't
+            # exist yet, but a PhrenForge-era ~/.phrenforge/remote_subagent.sqlite3
+            # does, copy it across so existing fleets keep their task history.
+            if (
+                db_path == DEFAULT_DB
+                and not db_path.exists()
+                and _LEGACY_DEFAULT_DB.exists()
+            ):
+                try:
+                    import shutil
 
-                shutil.copy2(_LEGACY_DEFAULT_DB, db_path)
-                LOGGER.info(
-                    "Migrated legacy hub DB %s -> %s",
-                    _LEGACY_DEFAULT_DB,
-                    db_path,
-                )
-            except OSError as exc:  # pragma: no cover - migration is advisory
-                LOGGER.warning(
-                    "Legacy hub DB migration failed (%s -> %s): %s",
-                    _LEGACY_DEFAULT_DB,
-                    db_path,
-                    exc,
-                )
+                    shutil.copy2(_LEGACY_DEFAULT_DB, db_path)
+                    LOGGER.info(
+                        "Migrated legacy hub DB %s -> %s",
+                        _LEGACY_DEFAULT_DB,
+                        db_path,
+                    )
+                except OSError as exc:  # pragma: no cover - migration is advisory
+                    LOGGER.warning(
+                        "Legacy hub DB migration failed (%s -> %s): %s",
+                        _LEGACY_DEFAULT_DB,
+                        db_path,
+                        exc,
+                    )
+        else:
+            LOGGER.info(
+                "Blackboard backend=rqlite host=%s port=%s",
+                rqlite_host,
+                rqlite_port,
+            )
         self._init_schema()
         # Stage C.3: in-memory per-task stream-seq counter. Resets on hub
         # restart and re-primes lazily from MAX(seq) in SQLite, so kill -9
@@ -166,8 +203,25 @@ class Blackboard:
 
     # ------------------------------------------------------------------ infra
 
+    @property
+    def backend(self) -> str:
+        """Active backend: ``"sqlite"`` or ``"rqlite"``."""
+        return self._backend
+
     @contextlib.contextmanager
-    def _connect(self) -> Iterable[sqlite3.Connection]:
+    def _connect(self) -> Iterable[Any]:
+        if self._backend == "rqlite":
+            conn = _rqlite_db.connect(
+                self._rqlite_host,
+                self._rqlite_port,
+                timeout=30.0,
+                consistency=self._rqlite_consistency,
+            )
+            try:
+                yield conn
+            finally:
+                conn.close()
+            return
         conn = sqlite3.connect(
             self._db_path,
             isolation_level=None,  # autocommit; we use BEGIN IMMEDIATE explicitly
@@ -313,7 +367,6 @@ class Blackboard:
         dispatcher_id: str | None = None,
     ) -> dict[str, Any]:
         with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
             cur = conn.execute(
                 """
                 INSERT INTO tasks (
@@ -322,6 +375,7 @@ class Blackboard:
                     required_tools, required_tags, tenant, workspace_root,
                     require_base_commit, dispatcher_id
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                RETURNING id
                 """,
                 (
                     todo_id,
@@ -341,8 +395,8 @@ class Blackboard:
                     dispatcher_id,
                 ),
             )
-            task_id = cur.lastrowid
-            conn.execute("COMMIT")
+            row = cur.fetchone()
+            task_id = int(row["id"]) if row is not None else cur.lastrowid
         return self.get_task(task_id)
 
     def get_task(self, task_id: int) -> dict[str, Any]:
@@ -359,6 +413,14 @@ class Blackboard:
         if result_row is not None:
             record["result"] = _result_row_to_dict(result_row)
         return record
+
+    def count_tasks(self) -> int:
+        """Return total task count. Used by /state/import safety check."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()
+        if row is None:
+            return 0
+        return int(row["n"])
 
     def list_tasks(
         self,
@@ -384,19 +446,35 @@ class Blackboard:
         hostname: str | None,
         capabilities: dict[str, Any] | None,
     ) -> dict[str, Any] | None:
-        """Atomically transition the highest-priority queued task to claimed."""
+        """Atomically transition the highest-priority queued task to claimed.
+
+        Implementation note: previously this used ``BEGIN IMMEDIATE`` +
+        ``SELECT id ... LIMIT 1`` + ``UPDATE``. That cross-statement
+        transaction does not survive on rqlite (HTTP request boundary
+        is the transaction boundary). We now use a single
+        ``UPDATE ... WHERE id = (SELECT ... LIMIT 1) RETURNING id``
+        which is atomic on both stdlib :mod:`sqlite3` and rqlite (each
+        rqlite write goes through Raft consensus so concurrent claims
+        are serialized).
+        """
         now_iso = _now_iso()
         with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
+            claim = conn.execute(
                 """
-                SELECT id FROM tasks
-                WHERE status = 'queued' AND cancel_requested = 0
-                ORDER BY priority DESC, id ASC
-                LIMIT 1
-                """
+                UPDATE tasks
+                SET status = 'claimed', worker_id = ?, claimed_at = ?
+                WHERE id = (
+                    SELECT id FROM tasks
+                    WHERE status = 'queued' AND cancel_requested = 0
+                    ORDER BY priority DESC, id ASC
+                    LIMIT 1
+                )
+                RETURNING id
+                """,
+                (worker_id, now_iso),
             ).fetchone()
-            if row is None:
+            if claim is None:
+                # No queued task. Still record the worker heartbeat.
                 conn.execute(
                     """
                     INSERT INTO workers (worker_id, hostname, capabilities, last_seen)
@@ -413,19 +491,8 @@ class Blackboard:
                         now_iso,
                     ),
                 )
-                conn.execute("COMMIT")
                 return None
-            task_id = row["id"]
-            conn.execute(
-                """
-                UPDATE tasks
-                SET status = 'claimed',
-                    worker_id = ?,
-                    claimed_at = ?
-                WHERE id = ?
-                """,
-                (worker_id, now_iso, task_id),
-            )
+            task_id = claim["id"]
             conn.execute(
                 """
                 INSERT INTO workers (worker_id, hostname, capabilities, last_seen, current_task_id)
@@ -444,7 +511,6 @@ class Blackboard:
                     task_id,
                 ),
             )
-            conn.execute("COMMIT")
         return self.get_task(task_id)
 
     def mark_running(self, task_id: int) -> dict[str, Any]:
@@ -493,19 +559,32 @@ class Blackboard:
             raise ValueError(f"invalid terminal status: {status_value}")
         now = _now_iso()
         with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                "SELECT worker_id, status FROM tasks WHERE id = ?",
-                (task_id,),
+            # Ownership-CAS via UPDATE...RETURNING. If no row matches the
+            # ``id = ? AND worker_id = ?`` precondition we then disambiguate
+            # KeyError vs PermissionError with a single follow-up SELECT.
+            # Previously a BEGIN IMMEDIATE wrapped the whole block, which is
+            # not portable to rqlite (no cross-statement transactions over
+            # HTTP).
+            claimed = conn.execute(
+                """
+                UPDATE tasks
+                SET status = ?, completed_at = ?
+                WHERE id = ? AND worker_id = ?
+                RETURNING id
+                """,
+                (status_value, now, task_id, worker_id),
             ).fetchone()
-            if row is None:
-                conn.execute("ROLLBACK")
-                raise KeyError(task_id)
-            if row["worker_id"] != worker_id:
-                conn.execute("ROLLBACK")
+            if claimed is None:
+                # Disambiguate: did the task not exist, or did it exist but
+                # belong to someone else?
+                existing = conn.execute(
+                    "SELECT worker_id FROM tasks WHERE id = ?", (task_id,)
+                ).fetchone()
+                if existing is None:
+                    raise KeyError(task_id)
                 raise PermissionError(
                     f"worker {worker_id!r} cannot report result for task "
-                    f"owned by {row['worker_id']!r}"
+                    f"owned by {existing['worker_id']!r}"
                 )
             conn.execute(
                 """
@@ -530,18 +609,9 @@ class Blackboard:
                 ),
             )
             conn.execute(
-                """
-                UPDATE tasks
-                SET status = ?, completed_at = ?
-                WHERE id = ?
-                """,
-                (status_value, now, task_id),
-            )
-            conn.execute(
                 "UPDATE workers SET current_task_id = NULL, last_seen = ? WHERE worker_id = ?",
                 (now, worker_id),
             )
-            conn.execute("COMMIT")
         return self.get_task(task_id)
 
     # -------------------------------------------------------------- progress
@@ -554,41 +624,48 @@ class Blackboard:
         message: str,
         files_touched: list[str] | None,
     ) -> dict[str, Any]:
+        """Append one progress entry under an ownership guard.
+
+        Single-statement INSERT...SELECT computes ``next_seq`` from
+        ``MAX(seq)`` *and* enforces the worker-ownership precondition
+        in one round-trip. ``RETURNING`` surfaces the assigned ``id``
+        and ``seq`` so the caller never needs a follow-up read.
+        """
+        now = _now_iso()
+        files_json = json.dumps(files_touched or [])
         with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                "SELECT worker_id FROM tasks WHERE id = ?",
-                (task_id,),
-            ).fetchone()
-            if row is None:
-                conn.execute("ROLLBACK")
-                raise KeyError(task_id)
-            if row["worker_id"] != worker_id:
-                conn.execute("ROLLBACK")
-                raise PermissionError("worker mismatch on progress")
-            seq_row = conn.execute(
-                "SELECT COALESCE(MAX(seq), 0) AS s FROM progress WHERE task_id = ?",
-                (task_id,),
-            ).fetchone()
-            next_seq = int(seq_row["s"]) + 1
             cur = conn.execute(
                 """
                 INSERT INTO progress (task_id, seq, message, files_touched)
-                VALUES (?, ?, ?, ?)
+                SELECT
+                    t.id,
+                    COALESCE(
+                        (SELECT MAX(seq) FROM progress WHERE task_id = t.id),
+                        0
+                    ) + 1,
+                    ?,
+                    ?
+                FROM tasks t
+                WHERE t.id = ? AND t.worker_id = ?
+                RETURNING id, seq
                 """,
-                (
-                    task_id,
-                    next_seq,
-                    message,
-                    json.dumps(files_touched or []),
-                ),
+                (message, files_json, task_id, worker_id),
             )
-            entry_id = cur.lastrowid
+            row = cur.fetchone()
+            if row is None:
+                # Disambiguate KeyError vs PermissionError.
+                existing = conn.execute(
+                    "SELECT worker_id FROM tasks WHERE id = ?", (task_id,)
+                ).fetchone()
+                if existing is None:
+                    raise KeyError(task_id)
+                raise PermissionError("worker mismatch on progress")
+            entry_id = row["id"]
+            next_seq = row["seq"]
             conn.execute(
                 "UPDATE workers SET last_seen = ? WHERE worker_id = ?",
-                (_now_iso(), worker_id),
+                (now, worker_id),
             )
-            conn.execute("COMMIT")
         return {
             "id": entry_id,
             "task_id": task_id,
@@ -627,20 +704,21 @@ class Blackboard:
     def post_note(
         self, *, task_id: int, author: str, body: str
     ) -> dict[str, Any]:
+        """Post a note against a task; raises KeyError if no such task."""
         with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                "SELECT 1 FROM tasks WHERE id = ?", (task_id,)
-            ).fetchone()
-            if row is None:
-                conn.execute("ROLLBACK")
-                raise KeyError(task_id)
             cur = conn.execute(
-                "INSERT INTO notes (task_id, author, body) VALUES (?, ?, ?)",
-                (task_id, author, body),
+                """
+                INSERT INTO notes (task_id, author, body)
+                SELECT t.id, ?, ?
+                FROM tasks t WHERE t.id = ?
+                RETURNING id
+                """,
+                (author, body, task_id),
             )
-            note_id = cur.lastrowid
-            conn.execute("COMMIT")
+            row = cur.fetchone()
+            if row is None:
+                raise KeyError(task_id)
+            note_id = row["id"]
         return {"id": note_id, "task_id": task_id, "author": author, "body": body}
 
     def read_notes(
@@ -802,21 +880,17 @@ class Blackboard:
         """Insert or update a runner registration row.
 
         Caller must have already verified the signature and protocol version.
+
+        Key-binding rule: an existing ``runner_id`` may not be re-bound to a
+        new ``public_key``. We enforce this in a single statement using
+        ``ON CONFLICT(runner_id) DO UPDATE ... WHERE
+        runners.public_key = excluded.public_key`` -- a mismatch leaves the
+        row untouched (rows_affected == 0) and we then raise
+        ``PermissionError``.
         """
         now = _now_iso()
         with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            existing = conn.execute(
-                "SELECT public_key, first_seen FROM runners WHERE runner_id = ?",
-                (record["runner_id"],),
-            ).fetchone()
-            if existing is not None and existing["public_key"] != record["public_key"]:
-                conn.execute("ROLLBACK")
-                raise PermissionError(
-                    "runner_id is already bound to a different public_key"
-                )
-            first_seen = existing["first_seen"] if existing else now
-            conn.execute(
+            cur = conn.execute(
                 """
                 INSERT INTO runners (
                     runner_id, public_key, hostname, os, arch, cpu_model,
@@ -826,7 +900,6 @@ class Blackboard:
                     first_seen, last_heartbeat
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(runner_id) DO UPDATE SET
-                    public_key       = excluded.public_key,
                     hostname         = excluded.hostname,
                     os               = excluded.os,
                     arch             = excluded.arch,
@@ -846,6 +919,8 @@ class Blackboard:
                     drain_requested  = 0,
                     metadata         = excluded.metadata,
                     last_heartbeat   = excluded.last_heartbeat
+                WHERE runners.public_key = excluded.public_key
+                RETURNING runner_id
                 """,
                 (
                     record["runner_id"],
@@ -868,11 +943,17 @@ class Blackboard:
                     "online",
                     0,
                     json.dumps(record.get("metadata", {})),
-                    first_seen,
+                    now,  # first_seen (only used on INSERT path)
                     now,
                 ),
             )
-            conn.execute("COMMIT")
+            if cur.fetchone() is None:
+                # Either no row was inserted/updated. The only reason that
+                # can happen here is the conflict-WHERE filter: an existing
+                # runner_id with a different public_key.
+                raise PermissionError(
+                    "runner_id is already bound to a different public_key"
+                )
         return self.get_runner(record["runner_id"])
 
     def get_runner(self, runner_id: str) -> dict[str, Any]:
@@ -910,18 +991,7 @@ class Blackboard:
     ) -> dict[str, Any]:
         now = _now_iso()
         with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                "SELECT runner_id, last_nonce FROM runners WHERE runner_id = ?",
-                (runner_id,),
-            ).fetchone()
-            if row is None:
-                conn.execute("ROLLBACK")
-                raise KeyError(runner_id)
-            if row["last_nonce"] is not None and row["last_nonce"] == nonce:
-                conn.execute("ROLLBACK")
-                raise PermissionError("nonce replay rejected")
-            conn.execute(
+            cur = conn.execute(
                 """
                 UPDATE runners
                 SET last_heartbeat = ?,
@@ -936,6 +1006,8 @@ class Blackboard:
                                        ELSE 'online'
                                      END
                 WHERE runner_id = ?
+                  AND (last_nonce IS NULL OR last_nonce != ?)
+                RETURNING runner_id
                 """,
                 (
                     now,
@@ -946,9 +1018,17 @@ class Blackboard:
                     last_known_commit,
                     nonce,
                     runner_id,
+                    nonce,
                 ),
             )
-            conn.execute("COMMIT")
+            if cur.fetchone() is None:
+                # Either the runner doesn't exist or the nonce was replayed.
+                exists = conn.execute(
+                    "SELECT 1 FROM runners WHERE runner_id = ?", (runner_id,)
+                ).fetchone()
+                if exists is None:
+                    raise KeyError(runner_id)
+                raise PermissionError("nonce replay rejected")
         return self.get_runner(runner_id)
 
     def request_drain(self, runner_id: str) -> dict[str, Any]:
@@ -1012,18 +1092,7 @@ class Blackboard:
         """
         now = _now_iso()
         with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            existing = conn.execute(
-                "SELECT public_key, first_seen FROM dispatchers WHERE dispatcher_id = ?",
-                (dispatcher_id,),
-            ).fetchone()
-            if existing is not None and existing["public_key"] != public_key:
-                conn.execute("ROLLBACK")
-                raise PermissionError(
-                    "dispatcher_id is already bound to a different public_key"
-                )
-            first_seen = existing["first_seen"] if existing else now
-            conn.execute(
+            cur = conn.execute(
                 """
                 INSERT INTO dispatchers (
                     dispatcher_id, public_key, label, hostname, metadata,
@@ -1034,6 +1103,8 @@ class Blackboard:
                     hostname  = excluded.hostname,
                     metadata  = excluded.metadata,
                     last_seen = excluded.last_seen
+                WHERE dispatchers.public_key = excluded.public_key
+                RETURNING dispatcher_id
                 """,
                 (
                     dispatcher_id,
@@ -1041,11 +1112,16 @@ class Blackboard:
                     label,
                     hostname,
                     json.dumps(metadata or {}),
-                    first_seen,
+                    now,  # first_seen (only used on INSERT path)
                     now,
                 ),
             )
-            conn.execute("COMMIT")
+            if cur.fetchone() is None:
+                # Conflict-WHERE filtered the UPDATE: existing dispatcher_id
+                # bound to a different public_key.
+                raise PermissionError(
+                    "dispatcher_id is already bound to a different public_key"
+                )
         return self.get_dispatcher(dispatcher_id)
 
     def get_dispatcher(self, dispatcher_id: str) -> dict[str, Any]:
@@ -1096,22 +1172,24 @@ class Blackboard:
         """
         now = _now_iso()
         with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute(
-                "SELECT last_nonce FROM dispatchers WHERE dispatcher_id = ?",
-                (dispatcher_id,),
-            ).fetchone()
-            if row is None:
-                conn.execute("ROLLBACK")
-                raise KeyError(dispatcher_id)
-            if row["last_nonce"] is not None and row["last_nonce"] == nonce:
-                conn.execute("ROLLBACK")
-                raise PermissionError("nonce replay rejected")
-            conn.execute(
-                "UPDATE dispatchers SET last_nonce = ?, last_seen = ? WHERE dispatcher_id = ?",
-                (nonce, now, dispatcher_id),
+            cur = conn.execute(
+                """
+                UPDATE dispatchers
+                SET last_nonce = ?, last_seen = ?
+                WHERE dispatcher_id = ?
+                  AND (last_nonce IS NULL OR last_nonce != ?)
+                RETURNING dispatcher_id
+                """,
+                (nonce, now, dispatcher_id, nonce),
             )
-            conn.execute("COMMIT")
+            if cur.fetchone() is None:
+                exists = conn.execute(
+                    "SELECT 1 FROM dispatchers WHERE dispatcher_id = ?",
+                    (dispatcher_id,),
+                ).fetchone()
+                if exists is None:
+                    raise KeyError(dispatcher_id)
+                raise PermissionError("nonce replay rejected")
 
     @staticmethod
     def _derive_state(runner: dict[str, Any]) -> str:
@@ -1165,15 +1243,18 @@ class Blackboard:
         """
         info: dict[str, Any] = {"reason": "queue_empty", "candidates_seen": 0}
         with self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
+            # Reads (autocommit). With rqlite there is no cross-statement
+            # transaction; each request is its own Raft round-trip.
+            # Concurrency-safety for the final claim still holds because
+            # the UPDATE-CAS at the bottom checks the precondition
+            # ``status='queued' AND cancel_requested=0`` and rqlite
+            # serializes writes through Raft.
             runner_row = conn.execute(
                 "SELECT * FROM runners WHERE runner_id = ?", (runner_id,)
             ).fetchone()
             if runner_row is None:
-                conn.execute("ROLLBACK")
                 raise KeyError(runner_id)
             if runner_row["drain_requested"]:
-                conn.execute("ROLLBACK")
                 info["reason"] = "drain"
                 return None, info
             current_load = conn.execute(
@@ -1184,19 +1265,16 @@ class Blackboard:
                 (runner_id,),
             ).fetchone()["n"]
             if current_load >= int(runner_row["max_concurrent"]):
-                conn.execute("ROLLBACK")
                 info["reason"] = "concurrency_cap"
                 info["current_load"] = current_load
                 info["max_concurrent"] = int(runner_row["max_concurrent"])
                 return None, info
             # Resource gates.
             if ram_free_mb is not None and ram_free_mb < DEFAULT_MIN_RAM_FREE_MB:
-                conn.execute("ROLLBACK")
                 info["reason"] = "resource_gate"
                 info["detail"] = f"ram_free_mb {ram_free_mb} < {DEFAULT_MIN_RAM_FREE_MB}"
                 return None, info
             if on_battery and battery_pct is not None and battery_pct < DEFAULT_MIN_BATTERY_PCT:
-                conn.execute("ROLLBACK")
                 info["reason"] = "resource_gate"
                 info["detail"] = f"on battery {battery_pct}% < {DEFAULT_MIN_BATTERY_PCT}"
                 return None, info
@@ -1209,7 +1287,6 @@ class Blackboard:
                 """,
             ).fetchall()
             if not rows:
-                conn.execute("ROLLBACK")
                 return None, info
             # Build candidate dicts the router facade can consume.
             candidates: list[dict[str, Any]] = []
@@ -1235,23 +1312,35 @@ class Blackboard:
             }
             picked_idx, candidates_seen = _router_pick_task(candidates, runner_view)
             info["candidates_seen"] = candidates_seen
-            chosen: sqlite3.Row | None = (
-                rows[picked_idx] if picked_idx is not None else None
-            )
+            chosen = rows[picked_idx] if picked_idx is not None else None
             if chosen is None:
-                conn.execute("ROLLBACK")
                 info["reason"] = "no_eligible_runner"
                 return None, info
-            task_id = chosen["id"]
+            task_id = int(chosen["id"])
             now = _now_iso()
-            conn.execute(
+            # CAS claim: only succeed if the task is still queued.
+            # If two runners pick the same task concurrently (against
+            # different cluster nodes), Raft serializes and exactly one
+            # wins. The loser sees ``rowcount == 0`` and falls through
+            # to a "no_eligible_runner" diagnostic so the caller retries.
+            claimed = conn.execute(
                 """
                 UPDATE tasks
                 SET status = 'claimed', worker_id = ?, claimed_at = ?
                 WHERE id = ?
+                  AND status = 'queued'
+                  AND cancel_requested = 0
+                RETURNING id
                 """,
                 (runner_id, now, task_id),
-            )
+            ).fetchone()
+            if claimed is None:
+                # Lost the race or task was cancelled between candidate
+                # SELECT and CAS. Surface as "no_eligible_runner" so the
+                # caller treats it like any other no-match outcome.
+                info["reason"] = "no_eligible_runner"
+                info["detail"] = "lost_claim_race"
+                return None, info
             # Maintain legacy workers row for backcompat consumers.
             conn.execute(
                 """
@@ -1277,7 +1366,6 @@ class Blackboard:
                     task_id,
                 ),
             )
-            conn.execute("COMMIT")
         return self.get_task(task_id), {"reason": "claimed"}
 
 
@@ -1536,7 +1624,13 @@ def create_app(config: BlackboardConfig) -> FastAPI:
         title="ForgeWire Fabric Hub",
         version="0.1.0",
     )
-    blackboard = Blackboard(config.db_path)
+    blackboard = Blackboard(
+        config.db_path,
+        backend=config.backend,
+        rqlite_host=config.rqlite_host,
+        rqlite_port=config.rqlite_port,
+        rqlite_consistency=config.rqlite_consistency,
+    )
     app.state.blackboard = blackboard
     app.state.token = config.token
     app.state.started_at = time.time()
@@ -1573,15 +1667,67 @@ def create_app(config: BlackboardConfig) -> FastAPI:
 
     @app.get("/state/snapshot", dependencies=[Depends(require_auth)])
     async def state_snapshot(request: Request) -> JSONResponse:
-        """Atomic SQLite snapshot for failover replication.
+        """PARITY-ONLY: atomic state snapshot for failover replication.
 
-        Uses ``VACUUM INTO`` so the snapshot is consistent without blocking
-        writers. Returns the raw SQLite file as
-        ``application/x-sqlite3``. The caller is expected to be a peer hub
-        node periodically pulling state, or a promote workflow on a
-        candidate node.
+        .. deprecated::
+            Under ``--backend rqlite`` (the production default), the
+            Raft cluster IS the durability tier. Routine DR backups go
+            through ``scripts/dr/backup_rqlite.ps1`` pulling
+            ``/db/backup?redirect=true`` directly from the cluster.
+            See ``docs/operations/dr-rqlite-backups.md``.
+
+            This endpoint is kept ONLY as a parity path for:
+              * legacy ``--backend sqlite`` single-node deployments;
+              * one-shot exit-hatch dumps when migrating off rqlite;
+              * authenticated snapshot fetches that don't have direct
+                network access to the rqlite voters.
+
+            New automation MUST NOT depend on this endpoint.
+
+        Backend-aware:
+
+        * ``sqlite``: ``VACUUM INTO`` over a freshly-opened read-only
+          handle. Returns the raw SQLite file as
+          ``application/x-sqlite3``.
+        * ``rqlite``: proxies the call to the cluster's
+          ``/db/backup`` endpoint and returns the byte-identical blob.
         """
         from fastapi.responses import Response as _FResp
+
+        if config.backend == "rqlite":
+            # Stream the rqlite-native backup. ``/db/backup`` returns a
+            # consistent SQLite file produced by VACUUM INTO inside the
+            # cluster, so the body is byte-for-byte equivalent to the
+            # sqlite-mode response.
+            try:
+                with httpx.Client(
+                    base_url=f"http://{config.rqlite_host}:{config.rqlite_port}",
+                    timeout=60.0,
+                    follow_redirects=True,
+                ) as client:
+                    resp = client.get("/db/backup")
+                    if resp.status_code != 200:
+                        raise HTTPException(
+                            status_code=502,
+                            detail=(
+                                f"rqlite /db/backup failed: "
+                                f"{resp.status_code} {resp.text[:200]}"
+                            ),
+                        )
+                    data = resp.content
+            except httpx.HTTPError as exc:
+                raise HTTPException(
+                    status_code=502, detail=f"rqlite unreachable: {exc}"
+                )
+            return _FResp(
+                content=data,
+                media_type="application/x-sqlite3",
+                headers={
+                    "X-Snapshot-Generated-At": str(time.time()),
+                    "X-Hub-Started-At": str(app.state.started_at),
+                    "X-Snapshot-Source": "rqlite",
+                },
+            )
 
         snap_dir = config.db_path.parent / "snapshots"
         snap_dir.mkdir(parents=True, exist_ok=True)
@@ -1603,12 +1749,29 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             headers={
                 "X-Snapshot-Generated-At": str(time.time()),
                 "X-Hub-Started-At": str(app.state.started_at),
+                "X-Snapshot-Source": "sqlite",
             },
         )
 
     @app.post("/state/import", dependencies=[Depends(require_auth)])
     async def state_import(request: Request) -> dict[str, Any]:
-        """Import a snapshot to bootstrap a freshly-promoted hub.
+        """PARITY-ONLY: import a snapshot to bootstrap a fresh hub.
+
+        .. deprecated::
+            Under ``--backend rqlite``, hub failover is handled by Raft
+            consensus -- there is no "promote" step and no need to
+            replay a snapshot to recover. Routine restores go through
+            rqlite's native ``/db/load`` (see
+            ``docs/operations/dr-rqlite-backups.md``).
+
+            This endpoint is kept ONLY as a parity path for:
+              * bootstrapping an empty rqlite cluster from a DR backup
+                (the rqlite branch below proxies straight to ``/db/load``);
+              * legacy ``--backend sqlite`` single-node restores;
+              * authenticated bulk restores that don't have direct
+                network access to the rqlite voters.
+
+            New automation MUST NOT depend on this endpoint.
 
         Refuses if any tasks have been claimed *after* the hub started --
         this protects against accidentally stomping a live hub. Use
@@ -1620,9 +1783,7 @@ def create_app(config: BlackboardConfig) -> FastAPI:
         force = request.headers.get("x-force", "").strip() == "1"
         # Safety: refuse if this hub has activity since start.
         if not force:
-            with sqlite3.connect(config.db_path) as conn:
-                cur = conn.execute("SELECT COUNT(*) FROM tasks")
-                count = int(cur.fetchone()[0])
+            count = blackboard.count_tasks()
             if count > 0:
                 raise HTTPException(
                     status_code=409,
@@ -1631,6 +1792,36 @@ def create_app(config: BlackboardConfig) -> FastAPI:
                         f"({count} tasks); send X-Force: 1 to override"
                     ),
                 )
+
+        if config.backend == "rqlite":
+            # rqlite-native bulk load. ``/db/load`` accepts a SQLite file
+            # body (application/octet-stream) and atomically replaces the
+            # cluster state via Raft. Returns 200 on success.
+            try:
+                with httpx.Client(
+                    base_url=f"http://{config.rqlite_host}:{config.rqlite_port}",
+                    timeout=120.0,
+                    follow_redirects=True,
+                ) as client:
+                    resp = client.post(
+                        "/db/load",
+                        content=body,
+                        headers={"Content-Type": "application/octet-stream"},
+                    )
+                    if resp.status_code != 200:
+                        raise HTTPException(
+                            status_code=502,
+                            detail=(
+                                f"rqlite /db/load failed: "
+                                f"{resp.status_code} {resp.text[:200]}"
+                            ),
+                        )
+            except httpx.HTTPError as exc:
+                raise HTTPException(
+                    status_code=502, detail=f"rqlite unreachable: {exc}"
+                )
+            return {"status": "imported", "bytes": len(body), "backend": "rqlite"}
+
         # Atomic replace: write to .new, fsync, rename.
         new_path = config.db_path.with_suffix(config.db_path.suffix + ".new")
         new_path.write_bytes(body)
@@ -1646,6 +1837,7 @@ def create_app(config: BlackboardConfig) -> FastAPI:
         return {
             "status": "imported",
             "bytes": len(body),
+            "backend": "sqlite",
         }
 
     @app.post("/tasks", dependencies=[Depends(require_auth)])
@@ -2240,6 +2432,32 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         in {"1", "true", "yes", "on"},
         help="Advertise the hub on the local LAN via mDNS (_forgewire-hub._tcp).",
     )
+    parser.add_argument(
+        "--backend",
+        choices=("sqlite", "rqlite"),
+        default=os.environ.get("FORGEWIRE_HUB_BACKEND", "sqlite"),
+        help=(
+            "State backend. 'sqlite' = legacy single-node WAL (default). "
+            "'rqlite' = Raft-replicated cluster via HTTP. Schema is identical."
+        ),
+    )
+    parser.add_argument(
+        "--rqlite-host",
+        default=os.environ.get("FORGEWIRE_HUB_RQLITE_HOST", "127.0.0.1"),
+        help="rqlite cluster member host (any node; writes auto-redirect to leader).",
+    )
+    parser.add_argument(
+        "--rqlite-port",
+        type=int,
+        default=int(os.environ.get("FORGEWIRE_HUB_RQLITE_PORT", "4001")),
+        help="rqlite HTTP API port (default 4001).",
+    )
+    parser.add_argument(
+        "--rqlite-consistency",
+        default=os.environ.get("FORGEWIRE_HUB_RQLITE_CONSISTENCY", "strong"),
+        choices=("none", "weak", "strong", "linearizable"),
+        help="rqlite read consistency level for SELECTs.",
+    )
     return parser.parse_args(argv)
 
 
@@ -2255,6 +2473,10 @@ def main(argv: list[str] | None = None) -> None:
         port=args.port,
         min_runner_version=args.min_runner_version,
         require_signed_dispatch=args.require_signed_dispatch,
+        backend=args.backend,
+        rqlite_host=args.rqlite_host,
+        rqlite_port=args.rqlite_port,
+        rqlite_consistency=args.rqlite_consistency,
     )
     logging.basicConfig(
         level=args.log_level.upper(),
