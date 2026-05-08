@@ -1652,7 +1652,7 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             )
 
     @app.get("/healthz")
-    async def healthz() -> dict[str, Any]:
+    def healthz() -> dict[str, Any]:
         return {
             "status": "ok",
             "version": app.version,
@@ -1667,7 +1667,7 @@ def create_app(config: BlackboardConfig) -> FastAPI:
         }
 
     @app.get("/state/snapshot", dependencies=[Depends(require_auth)])
-    async def state_snapshot(request: Request) -> JSONResponse:
+    def state_snapshot(request: Request) -> JSONResponse:
         """PARITY-ONLY: atomic state snapshot for failover replication.
 
         .. deprecated::
@@ -1842,7 +1842,7 @@ def create_app(config: BlackboardConfig) -> FastAPI:
         }
 
     @app.post("/tasks", dependencies=[Depends(require_auth)])
-    async def dispatch_task(payload: DispatchTaskRequest) -> dict[str, Any]:
+    def dispatch_task(payload: DispatchTaskRequest) -> dict[str, Any]:
         # M2.4: when require_signed_dispatch is set, the legacy bearer-only
         # path is closed. Clients must POST /tasks/v2 with a signed envelope.
         if config.require_signed_dispatch:
@@ -1872,20 +1872,20 @@ def create_app(config: BlackboardConfig) -> FastAPI:
         return task
 
     @app.get("/tasks", dependencies=[Depends(require_auth)])
-    async def list_tasks(
+    def list_tasks(
         status: str | None = None, limit: int = 100
     ) -> dict[str, Any]:
         return {"tasks": blackboard.list_tasks(status_filter=status, limit=limit)}
 
     @app.get("/tasks/{task_id}", dependencies=[Depends(require_auth)])
-    async def get_task(task_id: int) -> dict[str, Any]:
+    def get_task(task_id: int) -> dict[str, Any]:
         try:
             return blackboard.get_task(task_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="task not found") from exc
 
     @app.post("/tasks/claim", dependencies=[Depends(require_auth)])
-    async def claim_task(payload: ClaimRequest) -> JSONResponse:
+    def claim_task(payload: ClaimRequest) -> JSONResponse:
         task = blackboard.claim_next_task(
             worker_id=payload.worker_id,
             hostname=payload.hostname,
@@ -1912,7 +1912,7 @@ def create_app(config: BlackboardConfig) -> FastAPI:
     # ----- M2.4: dispatcher registry / signed dispatch ---------------------
 
     @app.post("/dispatchers/register", dependencies=[Depends(require_auth)])
-    async def register_dispatcher(payload: RegisterDispatcherRequest) -> dict[str, Any]:
+    def register_dispatcher(payload: RegisterDispatcherRequest) -> dict[str, Any]:
         _check_skew(payload.timestamp)
         signed = _signed_payload(
             {
@@ -1943,14 +1943,14 @@ def create_app(config: BlackboardConfig) -> FastAPI:
         }
 
     @app.get("/dispatchers", dependencies=[Depends(require_auth)])
-    async def list_dispatchers() -> dict[str, Any]:
+    def list_dispatchers() -> dict[str, Any]:
         return {
             "hub_protocol_version": PROTOCOL_VERSION,
             "dispatchers": blackboard.list_dispatchers(),
         }
 
     @app.post("/tasks/v2", dependencies=[Depends(require_auth)])
-    async def dispatch_task_signed(
+    def dispatch_task_signed(
         payload: DispatchTaskSignedRequest,
     ) -> dict[str, Any]:
         _check_skew(payload.timestamp)
@@ -2003,7 +2003,7 @@ def create_app(config: BlackboardConfig) -> FastAPI:
         )
 
     @app.post("/runners/register", dependencies=[Depends(require_auth)])
-    async def register_runner(payload: RegisterRequest) -> dict[str, Any]:
+    def register_runner(payload: RegisterRequest) -> dict[str, Any]:
         if payload.protocol_version != PROTOCOL_VERSION:
             if payload.protocol_version < MIN_COMPATIBLE_PROTOCOL_VERSION:
                 raise HTTPException(
@@ -2100,7 +2100,7 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             raise HTTPException(status_code=403, detail="invalid runner signature")
 
     @app.get("/runners", dependencies=[Depends(require_auth)])
-    async def list_runners() -> dict[str, Any]:
+    def list_runners() -> dict[str, Any]:
         return {
             "hub_protocol_version": PROTOCOL_VERSION,
             "runners": blackboard.list_runners(),
@@ -2108,11 +2108,11 @@ def create_app(config: BlackboardConfig) -> FastAPI:
 
     # -- labels (cosmetic, fabric-wide) ----------------------------------
     @app.get("/labels", dependencies=[Depends(require_auth)])
-    async def get_labels() -> dict[str, Any]:
+    def get_labels() -> dict[str, Any]:
         return blackboard.get_labels()
 
     @app.put("/labels/hub", dependencies=[Depends(require_auth)])
-    async def set_hub_label(payload: dict[str, Any]) -> dict[str, Any]:
+    def set_hub_label(payload: dict[str, Any]) -> dict[str, Any]:
         name = str(payload.get("name", "")).strip()
         if len(name) > 80:
             raise HTTPException(status_code=400, detail="hub name max 80 chars")
@@ -2121,7 +2121,7 @@ def create_app(config: BlackboardConfig) -> FastAPI:
         return blackboard.get_labels()
 
     @app.put("/labels/runners/{runner_id}", dependencies=[Depends(require_auth)])
-    async def set_runner_label(runner_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def set_runner_label(runner_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         alias = str(payload.get("alias", "")).strip()
         if len(alias) > 80:
             raise HTTPException(status_code=400, detail="runner alias max 80 chars")
@@ -2130,7 +2130,7 @@ def create_app(config: BlackboardConfig) -> FastAPI:
         return blackboard.get_labels()
 
     @app.post("/runners/{runner_id}/heartbeat", dependencies=[Depends(require_auth)])
-    async def heartbeat_runner(runner_id: str, payload: HeartbeatRequest) -> dict[str, Any]:
+    def heartbeat_runner(runner_id: str, payload: HeartbeatRequest) -> dict[str, Any]:
         if runner_id != payload.runner_id:
             raise HTTPException(status_code=400, detail="runner_id mismatch")
         _verify_runner_signature(
@@ -2157,7 +2157,7 @@ def create_app(config: BlackboardConfig) -> FastAPI:
         return record
 
     @app.post("/runners/{runner_id}/drain", dependencies=[Depends(require_auth)])
-    async def drain_runner(runner_id: str, payload: DrainRequest) -> dict[str, Any]:
+    def drain_runner(runner_id: str, payload: DrainRequest) -> dict[str, Any]:
         if runner_id != payload.runner_id:
             raise HTTPException(status_code=400, detail="runner_id mismatch")
         _verify_runner_signature(
@@ -2173,7 +2173,7 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             raise HTTPException(status_code=404, detail="runner not registered") from exc
 
     @app.post("/runners/{runner_id}/drain-by-dispatcher", dependencies=[Depends(require_auth)])
-    async def drain_runner_by_dispatcher(runner_id: str) -> dict[str, Any]:
+    def drain_runner_by_dispatcher(runner_id: str) -> dict[str, Any]:
         """Dispatcher-initiated drain. Bearer-only (no runner signature)."""
         try:
             return blackboard.request_drain(runner_id)
@@ -2181,7 +2181,7 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             raise HTTPException(status_code=404, detail="runner not registered") from exc
 
     @app.post("/runners/{runner_id}/undrain-by-dispatcher", dependencies=[Depends(require_auth)])
-    async def undrain_runner_by_dispatcher(runner_id: str) -> dict[str, Any]:
+    def undrain_runner_by_dispatcher(runner_id: str) -> dict[str, Any]:
         """Dispatcher-initiated un-drain (resume). Bearer-only."""
         try:
             return blackboard.request_undrain(runner_id)
@@ -2189,7 +2189,7 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             raise HTTPException(status_code=404, detail="runner not registered") from exc
 
     @app.post("/tasks/claim-v2", dependencies=[Depends(require_auth)])
-    async def claim_task_v2(payload: ClaimV2Request) -> JSONResponse:
+    def claim_task_v2(payload: ClaimV2Request) -> JSONResponse:
         _verify_runner_signature(
             op="claim",
             runner_id=payload.runner_id,
@@ -2216,21 +2216,21 @@ def create_app(config: BlackboardConfig) -> FastAPI:
         return JSONResponse(content={"task": task, "info": info})
 
     @app.post("/tasks/{task_id}/start", dependencies=[Depends(require_auth)])
-    async def mark_running(task_id: int) -> dict[str, Any]:
+    def mark_running(task_id: int) -> dict[str, Any]:
         try:
             return blackboard.mark_running(task_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="task not found") from exc
 
     @app.post("/tasks/{task_id}/cancel", dependencies=[Depends(require_auth)])
-    async def cancel_task(task_id: int) -> dict[str, Any]:
+    def cancel_task(task_id: int) -> dict[str, Any]:
         try:
             return blackboard.cancel_task(task_id)
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="task not found") from exc
 
     @app.post("/tasks/{task_id}/progress", dependencies=[Depends(require_auth)])
-    async def append_progress(
+    def append_progress(
         task_id: int, payload: ProgressRequest
     ) -> dict[str, Any]:
         try:
@@ -2246,7 +2246,7 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
 
     @app.post("/tasks/{task_id}/stream", dependencies=[Depends(require_auth)])
-    async def append_stream(
+    def append_stream(
         task_id: int, payload: StreamRequest
     ) -> dict[str, Any]:
         try:
@@ -2266,7 +2266,7 @@ def create_app(config: BlackboardConfig) -> FastAPI:
     @app.post(
         "/tasks/{task_id}/stream/bulk", dependencies=[Depends(require_auth)]
     )
-    async def append_stream_bulk(
+    def append_stream_bulk(
         task_id: int, payload: StreamBulkRequest
     ) -> dict[str, Any]:
         try:
@@ -2283,7 +2283,7 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/tasks/{task_id}/stream", dependencies=[Depends(require_auth)])
-    async def read_stream(
+    def read_stream(
         task_id: int, after_seq: int = 0, limit: int = 500
     ) -> dict[str, Any]:
         return {
@@ -2293,7 +2293,7 @@ def create_app(config: BlackboardConfig) -> FastAPI:
         }
 
     @app.post("/tasks/{task_id}/result", dependencies=[Depends(require_auth)])
-    async def submit_result(
+    def submit_result(
         task_id: int, payload: ResultRequest
     ) -> dict[str, Any]:
         try:
@@ -2316,7 +2316,7 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/tasks/{task_id}/notes", dependencies=[Depends(require_auth)])
-    async def post_note(task_id: int, payload: NoteRequest) -> dict[str, Any]:
+    def post_note(task_id: int, payload: NoteRequest) -> dict[str, Any]:
         try:
             return blackboard.post_note(
                 task_id=task_id, author=payload.author, body=payload.body
@@ -2325,11 +2325,11 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             raise HTTPException(status_code=404, detail="task not found") from exc
 
     @app.get("/tasks/{task_id}/notes", dependencies=[Depends(require_auth)])
-    async def read_notes(task_id: int, after_id: int = 0) -> dict[str, Any]:
+    def read_notes(task_id: int, after_id: int = 0) -> dict[str, Any]:
         return {"notes": blackboard.read_notes(task_id=task_id, after_id=after_id)}
 
     @app.get("/tasks/{task_id}/events", dependencies=[Depends(require_auth)])
-    async def task_events(task_id: int, request: Request) -> EventSourceResponse:
+    def task_events(task_id: int, request: Request) -> EventSourceResponse:
         async def stream() -> AsyncIterator[dict[str, Any]]:
             last_seq = 0
             terminal = {"done", "failed", "cancelled", "timed_out"}
