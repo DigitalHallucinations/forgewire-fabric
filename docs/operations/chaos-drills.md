@@ -15,13 +15,55 @@ substantive cluster changes) and archive the resulting JSONL log.
 Leader is whichever Raft elected last. node3-witness is a full voter
 sharing the OptiPlex host — quorum is 2 of 3.
 
-## Drills
+## Automatic mode (recommended)
 
-The runner is [`scripts/dr/chaos_drills.ps1`](../../scripts/dr/chaos_drills.ps1).
-It writes one JSONL record per phase to `logs/chaos/chaos.<UTC>.jsonl`.
+Chaos drills run on a single configured *driver* host as a SYSTEM-
+principal Windows scheduled task. Defaults are read from the `chaos:`
+block in [`config/cluster.yaml`](../../config/cluster.yaml):
+
+```yaml
+chaos:
+  enabled: true
+  cadence_minutes: 1440        # 24h
+  drills: kill-leader,lose-quorum
+  driver_node: node1           # only this voter installs the task
+  log_root: 'C:\ProgramData\forgewire\rqlite-chaos'
+  retention_days: 30
+```
+
+Each voter declares `service` (Windows service name) and `ssh_alias`
+(`local` if the script is running on the same host as the voter, else
+the SSH alias used to reach it). The driver host stops/starts services
+locally for its own voter and over SSH for the rest.
+
+Install on the driver host (OptiPlex/`node1` in production):
 
 ```powershell
-# Drills that involve OptiPlex services use the SSH alias 'forgewire'.
+ssh forgewire 'powershell -NoProfile -Command "cd C:\Projects\forgewire-fabric; pwsh -NoProfile -ExecutionPolicy Bypass -File scripts\dr\install_rqlite_chaos_task.ps1"'
+```
+
+The installer is self-elevating + idempotent. Output goes to
+`cfg.chaos.log_root` and is auto-pruned past `retention_days`.
+
+Trigger immediately for a smoke run:
+
+```powershell
+Start-ScheduledTask -TaskName ForgeWireRqliteChaos
+```
+
+The installer refuses to register on a non-driver host (single-driver
+rule). Pass `-Force` to override.
+
+## Manual mode
+
+The runner is [`scripts/dr/chaos_drills.ps1`](../../scripts/dr/chaos_drills.ps1).
+It writes one JSONL record per phase to `cfg.chaos.log_root\chaos.<UTC>.jsonl`.
+
+`Stop-Service` requires Administrator, so the script self-elevates on
+interactive runs (UAC prompt). When invoked under Task Scheduler as
+SYSTEM the elevation block is a no-op.
+
+```powershell
 pwsh -File scripts\dr\chaos_drills.ps1 -Drills 'kill-leader,lose-quorum'
 ```
 
@@ -95,6 +137,7 @@ across the failover and the quorum-loss window.
 
 ## Log retention
 
-Chaos logs live at `logs/chaos/chaos.<UTC>.jsonl` and are not
-auto-pruned. Treat them like any other operational log artifact and
-ship them to the central log store if available.
+Chaos logs live at `cfg.chaos.log_root` (default
+`C:\ProgramData\forgewire\rqlite-chaos\chaos.<UTC>.jsonl`) and are
+pruned past `cfg.chaos.retention_days` (default 30). Ship them to the
+central log store if available.

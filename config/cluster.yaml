@@ -31,26 +31,35 @@ hub_protocol_version: 2
 
 voters:
   - label: node1
+    node_id: node1-optiplex
     host: 10.120.81.95
     port: 4001
     raft_port: 4002
     role: voter
     priority: 1
     tags: [primary, optiplex]
+    service: ForgeWireRqliteNode1
+    ssh_alias: forgewire
   - label: witness
+    node_id: node3-witness
     host: 10.120.81.95
     port: 4011
     raft_port: 4012
     role: voter
     priority: 2
     tags: [witness, optiplex]
+    service: ForgeWireRqliteNode3
+    ssh_alias: forgewire
   - label: node2
+    node_id: node2-dell
     host: 10.120.81.56
     port: 4001
     raft_port: 4002
     role: voter
     priority: 3
     tags: [secondary, dell]
+    service: ForgeWireRqliteNode2
+    ssh_alias: local
 
 # Preferred control node for outbound operations issued *from this host*.
 # Override per-machine with the FORGEWIRE_PREFERRED_NODE env var or the
@@ -65,3 +74,28 @@ backups:
   retention_hours: 24
   min_bytes: 1024
   timeout_seconds: 60
+
+# Chaos drill defaults. The chaos installer (install_rqlite_chaos_task.ps1)
+# registers a Windows Task Scheduler job on the chosen driver host that
+# periodically runs scripts/dr/chaos_drills.ps1 and writes JSONL outcomes
+# to <log_root>\chaos.<UTC>.jsonl.
+#
+# Operator notes:
+#   * Drills cause real, observable Raft re-elections and brief
+#     write-refusal windows. The default cadence of 1440 minutes (24h)
+#     is intentionally conservative; lower values WILL show up as
+#     latency spikes on the hub.
+#   * "drills" is the comma-separated list passed to chaos_drills.ps1.
+#     Default excludes 'partition-recovery' because that drill touches
+#     Windows Firewall and is documented as a manual procedure.
+#   * "driver_node" is the cluster label of the host that should own
+#     the scheduled task. Only one driver per cluster, otherwise drills
+#     race each other.
+chaos:
+  enabled: true
+  cadence_minutes: 1440
+  drills: 'kill-leader,lose-quorum'
+  driver_node: node1
+  log_root: 'C:\ProgramData\forgewire\rqlite-chaos'
+  retention_days: 30
+  ssh_alias: forgewire
