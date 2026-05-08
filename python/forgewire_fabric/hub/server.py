@@ -163,6 +163,24 @@ class Blackboard:
         self._rqlite_port = rqlite_port
         self._rqlite_consistency = rqlite_consistency
         self._db_path = db_path
+        # Shared httpx.Client for the rqlite backend. One process-wide HTTP
+        # client with a generous keepalive pool means that the per-request
+        # `_connect()` context manager only allocates a thin wrapper around
+        # the already-warm TCP/keepalive sockets to rqlite, instead of
+        # paying TCP setup + a fresh connection-pool per call. Without
+        # this, every blackboard call under threadpool concurrency burns a
+        # new socket and starves the FastAPI threadpool waiting on Raft.
+        self._rqlite_client: httpx.Client | None = None
+        if backend == "rqlite":
+            self._rqlite_client = httpx.Client(
+                base_url=f"http://{rqlite_host}:{rqlite_port}",
+                timeout=30.0,
+                follow_redirects=True,
+                limits=httpx.Limits(
+                    max_connections=200,
+                    max_keepalive_connections=100,
+                ),
+            )
         if backend == "sqlite":
             self._db_path.parent.mkdir(parents=True, exist_ok=True)
             # One-shot legacy migration: if the operator hasn't pointed
@@ -217,6 +235,7 @@ class Blackboard:
                 self._rqlite_port,
                 timeout=30.0,
                 consistency=self._rqlite_consistency,
+                client=self._rqlite_client,
             )
             try:
                 yield conn
@@ -2362,6 +2381,27 @@ def create_app(config: BlackboardConfig) -> FastAPI:
     #    and produces "service running, hub unreachable". Convert any such
     #    fatal asyncio exception into a hard process exit; the supervisor
     #    will bring us back within seconds.
+    @app.on_event("startup")
+    async def _bump_threadpool() -> None:  # pragma: no cover - runtime
+        # FastAPI runs sync `def` route handlers on the anyio threadpool.
+        # The default limiter is 40, which is undersized for a hub serving
+        # tens of runners polling at >=1 Hz against an rqlite backend
+        # whose Raft-backed writes take 10-30 ms each. Bumping to 200 lets
+        # heartbeats and claims overlap freely instead of queueing behind
+        # /healthz.
+        try:
+            import anyio.to_thread
+
+            limiter = anyio.to_thread.current_default_thread_limiter()
+            limiter.total_tokens = 200
+            logging.getLogger("forgewire_fabric.hub").info(
+                "anyio threadpool sized to %d tokens", limiter.total_tokens
+            )
+        except Exception:  # pragma: no cover - best effort
+            logging.getLogger("forgewire_fabric.hub").exception(
+                "failed to resize anyio threadpool"
+            )
+
     @app.on_event("startup")
     async def _install_loop_watchdog() -> None:  # pragma: no cover - runtime
         loop = asyncio.get_running_loop()

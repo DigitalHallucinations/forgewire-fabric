@@ -236,6 +236,7 @@ class Connection:
         timeout: float = 30.0,
         scheme: str = "http",
         consistency: str = "strong",
+        client: "httpx.Client | None" = None,
     ) -> None:
         self._base = f"{scheme}://{host}:{port}"
         self._timeout = timeout
@@ -244,11 +245,23 @@ class Connection:
         self._consistency = consistency
         # httpx follows redirects by default; rqlite redirects writes from
         # followers to the leader (HTTP 301), which is exactly what we want.
-        self._client = httpx.Client(
-            base_url=self._base,
-            timeout=timeout,
-            follow_redirects=True,
-        )
+        # If a shared client is supplied, reuse it (pool-of-one across the
+        # whole hub process) and do not close it on Connection.close(). This
+        # avoids per-request TCP setup and connection-pool churn under load.
+        if client is not None:
+            self._client = client
+            self._owns_client = False
+        else:
+            self._client = httpx.Client(
+                base_url=self._base,
+                timeout=timeout,
+                follow_redirects=True,
+                limits=httpx.Limits(
+                    max_connections=200,
+                    max_keepalive_connections=100,
+                ),
+            )
+            self._owns_client = True
         self._lock = threading.Lock()
         # Buffered transaction state. None -> autocommit; list -> open tx.
         self._tx: list[tuple[str, tuple[Any, ...]]] | None = None
@@ -280,6 +293,8 @@ class Connection:
         if self._closed:
             return
         self._closed = True
+        if not self._owns_client:
+            return
         try:
             self._client.close()
         except Exception:  # pragma: no cover - best effort
@@ -551,6 +566,7 @@ def connect(
     timeout: float = 30.0,
     scheme: str = "http",
     consistency: str = "strong",
+    client: "httpx.Client | None" = None,
 ) -> Connection:
     """Open a Connection to an rqlite cluster member.
 
@@ -571,6 +587,7 @@ def connect(
         timeout=timeout,
         scheme=scheme,
         consistency=consistency,
+        client=client,
     )
 
 
