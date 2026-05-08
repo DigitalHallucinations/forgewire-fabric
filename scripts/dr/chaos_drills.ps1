@@ -269,6 +269,13 @@ if ($drillList -contains 'kill-leader') {
     $leaderVoter = $voterById[$leaderId]
     if (-not $leaderVoter) {
         Write-Event -Phase 'd1.skip' -Data @{ reason = "leader id $leaderId not in cluster.yaml" }
+    } elseif (-not (Test-VoterIsLocal -Voter $leaderVoter) -and -not $leaderVoter.ssh_alias) {
+        Write-Event -Phase 'd1.skip' -Data @{
+            reason   = 'leader is on a remote host with no ssh_alias from this driver'
+            leader   = $leaderId
+            host     = [string]$leaderVoter.host
+            hint     = 'set ssh_alias on this voter (reachable from the SYSTEM principal) to enable cross-host kill-leader'
+        }
     } else {
         try {
             $stopMs = Invoke-VoterService -Voter $leaderVoter -Action 'Stop'
@@ -349,6 +356,23 @@ if ($drillList -contains 'lose-quorum') {
             stopping    = (@($toStop) | ForEach-Object { $_.label })
         }
 
+        # Pre-flight: every voter we plan to stop must be controllable
+        # from this driver (local or has ssh_alias). Otherwise the drill
+        # would only partially execute and "lose-quorum" wouldn't.
+        $unreachable = @($toStop | Where-Object {
+            -not (Test-VoterIsLocal -Voter $_) -and -not $_.ssh_alias
+        })
+        $skipDrill = $false
+        if ($unreachable.Count -gt 0) {
+            Write-Event -Phase 'd2.skip' -Data @{
+                reason = 'one or more target voters are remote with no ssh_alias from this driver'
+                unreachable = (@($unreachable) | ForEach-Object { $_.label })
+                hint   = 'set ssh_alias on those voters (reachable from the SYSTEM principal) to enable lose-quorum'
+            }
+            $skipDrill = $true
+        }
+
+        if (-not $skipDrill) {
         $stopped = New-Object System.Collections.ArrayList
         try {
             foreach ($v in $toStop) {
@@ -398,6 +422,7 @@ if ($drillList -contains 'lose-quorum') {
             }
             Write-Event -Phase 'd2.full_restore' -Data @{ reachable = $reach }
         }
+        }  # end if (-not $skipDrill)
     }
 }
 
