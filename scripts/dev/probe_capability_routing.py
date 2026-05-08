@@ -1,9 +1,14 @@
 """Live capability-routing probe against the running hub.
 
-Registers a transient dispatcher, dispatches one task per runner with a
-disjoint required_tool, polls /tasks until each is claimed, then prints
-which runner picked which task. Cancels the tasks before exiting so the
-queue stays clean.
+This probe ONLY validates routing: "did the right runner claim the task?".
+It does NOT validate task execution. The dispatched tasks intentionally
+use a fake base_commit and an unreachable scope, so the runner WILL fail
+the task at the git-checkout step almost immediately. That terminal
+``status=failed`` is *expected* and is not what the verdict measures --
+the verdict measures which worker_id picked up each task before it died.
+
+The probe also cancels each task as a cleanup step before exit so the
+queue stays empty, and to avoid runners spinning on the doomed work.
 
 Usage:
     set FORGEWIRE_HUB_TOKEN=...
@@ -167,21 +172,28 @@ async def main() -> int:
                     if pending:
                         await asyncio.sleep(1.0)
 
-                print("--- verdict ---")
+                print("--- routing verdict (capability match only; task exec is expected to fail) ---")
                 ok = True
                 for rec in task_records:
                     target = rec["_target_host"]
                     tool = rec["_target_tool"]
                     wid = rec.get("worker_id")
+                    final_status = rec.get("status")
                     claimer = next((ru for ru in runners if ru["runner_id"] == wid), None)
                     if claimer is None:
-                        print(f"  FAIL task {rec['id']} ({target}/{tool}): not claimed (status={rec.get('status')})")
+                        print(f"  ROUTING-FAIL task {rec['id']} ({target}/{tool}): never claimed (status={final_status})")
                         ok = False
                         continue
                     if claimer["hostname"] == target and tool in claimer.get("tools", []):
-                        print(f"  PASS task {rec['id']}: required {tool} -> {claimer['hostname']} (tools={claimer.get('tools')})")
+                        print(
+                            f"  ROUTING-OK task {rec['id']}: required {tool} -> {claimer['hostname']} "
+                            f"(tools={claimer.get('tools')}); task exec status={final_status} (expected failed/running, see docstring)"
+                        )
                     else:
-                        print(f"  FAIL task {rec['id']} ({target}/{tool}): claimed by {claimer['hostname']} tools={claimer.get('tools')}")
+                        print(
+                            f"  ROUTING-FAIL task {rec['id']} ({target}/{tool}): claimed by "
+                            f"{claimer['hostname']} tools={claimer.get('tools')} status={final_status}"
+                        )
                         ok = False
                 return 0 if ok else 1
             finally:
