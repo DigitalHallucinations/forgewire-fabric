@@ -122,14 +122,46 @@ Write-Log "fail" @{ code = $code; error = $err; consecutive_failures = $count }
 
 if ($count -ge $FailureThreshold) {
     Write-Log "restart" @{ service = $ServiceName; consecutive_failures = $count }
+    $restarted = $false
+    # Try nssm first (preserves rotation/log config), falling back to the
+    # built-in Restart-Service which is always available under SYSTEM PATH.
+    $nssm = $null
+    foreach ($cand in @(
+            (Get-Command nssm.exe -ErrorAction SilentlyContinue).Source,
+            "$env:ProgramData\chocolatey\bin\nssm.exe",
+            "$env:ProgramFiles\nssm\nssm.exe",
+            "$env:ProgramFiles(x86)\nssm\nssm.exe",
+            "C:\Users\*\AppData\Local\Microsoft\WinGet\Links\nssm.exe"
+        )) {
+        if ($cand) {
+            $resolved = @(Resolve-Path -Path $cand -ErrorAction SilentlyContinue) | Select-Object -First 1
+            if ($resolved -and (Test-Path $resolved.Path)) { $nssm = $resolved.Path; break }
+        }
+    }
     try {
-        $nssm = (Get-Command nssm.exe -ErrorAction SilentlyContinue).Source
-        if (-not $nssm) { $nssm = "nssm.exe" }
-        & $nssm restart $ServiceName 2>&1 | Out-String | ForEach-Object { Add-Content -Path $LogPath -Value ("# nssm: " + $_.Trim()) -Encoding utf8 }
+        if ($nssm) {
+            & $nssm restart $ServiceName 2>&1 | Out-String | ForEach-Object { Add-Content -Path $LogPath -Value ("# nssm: " + $_.Trim()) -Encoding utf8 }
+            $restarted = $true
+        } else {
+            Restart-Service -Name $ServiceName -Force -ErrorAction Stop
+            $restarted = $true
+            Write-Log "restart_via" @{ method = "Restart-Service" }
+        }
     } catch {
-        Write-Log "restart_error" @{ error = $_.Exception.Message }
+        $methodName = if ($nssm) { "nssm" } else { "Restart-Service" }
+        Write-Log "restart_error" @{ error = $_.Exception.Message; method = $methodName }
+        # Last-ditch: kill the process so the supervisor brings us back.
+        try {
+            Get-Service -Name $ServiceName -ErrorAction SilentlyContinue | Stop-Service -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 2
+            Start-Service -Name $ServiceName -ErrorAction SilentlyContinue
+            $restarted = $true
+            Write-Log "restart_via" @{ method = "Stop+Start" }
+        } catch {
+            Write-Log "restart_error_final" @{ error = $_.Exception.Message }
+        }
     } finally {
-        Set-Content -Path $StateFile -Value "0" -Encoding ASCII -NoNewline
+        if ($restarted) { Set-Content -Path $StateFile -Value "0" -Encoding ASCII -NoNewline }
     }
 }
 '@
