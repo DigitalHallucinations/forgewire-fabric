@@ -99,21 +99,30 @@ backups:
 chaos:
   enabled: true
   cadence_minutes: 1440
+  # Default drill set. Available drills:
+  #   kill-leader        portable. POSTs /raft/stepdown to the leader's HTTP
+  #                      API and verifies a new leader is elected. No host
+  #                      access required.
+  #   kill-leader-hard   process-level kill via Stop-Service. Requires the
+  #                      leader's host to be local to the driver, or
+  #                      reachable via voter.ssh_alias from SYSTEM. Skips
+  #                      with a hint otherwise.
+  #   lose-quorum        stops two voters and verifies writes are refused
+  #                      on the survivor. Requires the same SSH access for
+  #                      any non-local target voters.
   drills: 'kill-leader,lose-quorum'
   driver_node: node1
   log_root: 'C:\ProgramData\forgewire\rqlite-chaos'
   retention_days: 30
 
-  # SSH identity provisioning for the SYSTEM principal. The chaos task
-  # runs as SYSTEM, which has no SSH keys by default, so when a drill
-  # needs to Stop-Service on a remote voter it has nothing to
-  # authenticate with. install_rqlite_chaos_task.ps1 invokes
-  # install_ssh_for_system.ps1 to drop a key + ssh_config under
-  # %WINDIR%\System32\config\systemprofile\.ssh\ before registering the
-  # task. Set provision_for_system: false to opt out (drills will then
-  # cleanly skip with a hint when leadership lands on a remote voter).
+  # SSH identity provisioning for the SYSTEM principal. Only needed when
+  # kill-leader-hard or lose-quorum need to reach a remote voter. The
+  # default drill set (kill-leader + lose-quorum where targets are
+  # local) does not require this; leave it false unless you have
+  # inbound sshd open on every voter host. See
+  # docs/operations/remote-subagent.md for the policy on enabling this.
   ssh:
-    provision_for_system: true
+    provision_for_system: false
     # Path to the private key that will be copied. Must already have
     # its public half in authorized_keys on every remote voter host.
     # ~ resolves to the installing user's profile.

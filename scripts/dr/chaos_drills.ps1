@@ -6,9 +6,18 @@
   Drives controlled failure modes against the cluster declared in
   config/cluster.yaml and records structured JSONL outcomes:
 
-    * kill-leader        : stop the current leader's service, time
-                           Raft re-election, write to the new leader,
-                           verify the old node rejoins.
+    * kill-leader        : portable. POSTs /leader to the current leader's
+                           HTTP API to trigger a voluntary stepdown, waits
+                           for the new election, writes to the new leader,
+                           and verifies the old node is back as a
+                           follower. No host access required — works
+                           cluster-wide over the rqlite HTTP API alone.
+    * kill-leader-hard   : stop the current leader's Windows service,
+                           time Raft re-election, write to the new leader,
+                           verify the old node rejoins. Requires the
+                           leader's host to be local to this driver (or
+                           reachable via voter.ssh_alias from SYSTEM).
+                           Skipped with a hint otherwise.
     * lose-quorum        : stop two of three voters, verify writes are
                            refused on the survivor, restore one node
                            and verify quorum + writes recover.
@@ -179,6 +188,26 @@ function Invoke-Query {
     }
 }
 
+# POST /leader to the leader's API endpoint (rqlite v8+). The leader
+# steps down voluntarily, an election runs, and a different voter takes
+# over. The stepped-down node remains alive as a follower, so no rejoin
+# is required. Works cluster-wide over the same HTTP port that clients
+# use. The optional 'wait' URL param blocks until the new leader is
+# elected; we use it so the call timing is meaningful.
+function Invoke-LeaderStepdown {
+    param([Parameter(Mandatory)][string]$BaseUrl)
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        $r = Invoke-WebRequest -Uri "$BaseUrl/leader?wait" -Method POST `
+            -TimeoutSec 30 -MaximumRedirection 5 -ErrorAction Stop
+        return @{ ok = $true; status = [int]$r.StatusCode; ms = [int]$sw.ElapsedMilliseconds }
+    } catch {
+        $resp = $_.Exception.Response
+        $status = if ($resp) { [int]$resp.StatusCode } else { -1 }
+        return @{ ok = $false; status = $status; error = $_.Exception.Message; ms = [int]$sw.ElapsedMilliseconds }
+    }
+}
+
 # Stop or start a voter's Windows service. We auto-detect whether the
 # voter's host is local to this machine by comparing voter.host to this
 # host's IPv4 addresses. If local, run Stop-/Start-Service in-process;
@@ -262,65 +291,122 @@ $null = Invoke-Write -BaseUrl $initial.api_addr -Sql `
 
 $drillList = $Drills -split '[,;]' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
 
-# --- Drill 1: kill leader -------------------------------------------------
+# --- Drill 1: kill leader (soft, via /raft/stepdown) ----------------------
+# This is the portable variant. It POSTs to the leader's HTTP API to
+# trigger a voluntary stepdown, then waits for a new leader. The old
+# leader stays alive as a follower, so no service restart is needed
+# and no host-level access (SSH, Stop-Service) is required.
 if ($drillList -contains 'kill-leader') {
-    Write-Event -Phase 'd1.start' -Data @{ }
+    Write-Event -Phase 'd1.start' -Data @{ mode = 'stepdown' }
     $leaderId = $initial.id
-    $leaderVoter = $voterById[$leaderId]
-    if (-not $leaderVoter) {
-        Write-Event -Phase 'd1.skip' -Data @{ reason = "leader id $leaderId not in cluster.yaml" }
-    } elseif (-not (Test-VoterIsLocal -Voter $leaderVoter) -and -not $leaderVoter.ssh_alias) {
-        Write-Event -Phase 'd1.skip' -Data @{
-            reason   = 'leader is on a remote host with no ssh_alias from this driver'
-            leader   = $leaderId
-            host     = [string]$leaderVoter.host
-            hint     = 'set ssh_alias on this voter (reachable from the SYSTEM principal) to enable cross-host kill-leader'
-        }
+    $leaderApi = $initial.api_addr
+    $stepdown = Invoke-LeaderStepdown -BaseUrl $leaderApi
+    Write-Event -Phase 'd1.stepdown' -Data $stepdown
+    if (-not $stepdown.ok) {
+        Write-Event -Phase 'd1.fail' -Data @{ message = 'stepdown call failed'; status = $stepdown.status }
     } else {
-        try {
-            $stopMs = Invoke-VoterService -Voter $leaderVoter -Action 'Stop'
-            Write-Event -Phase 'd1.stopped' -Data @{
-                service   = $leaderVoter.service
-                ssh_alias = $leaderVoter.ssh_alias
-                ms        = $stopMs
+        $other = $baseUrls | Where-Object { $_ -ne $leaderApi }
+        if (-not $other) { $other = $baseUrls }
+        $elect = Wait-ForLeader -BaseUrls $other -TimeoutMs 30000 -NotEqualToId $leaderId
+        if ($elect.leader) {
+            Write-Event -Phase 'd1.reelected' -Data @{
+                new_leader  = $elect.leader.id
+                api         = $elect.leader.api_addr
+                elapsed_ms  = $elect.elapsed_ms
             }
+            $w = Invoke-Write -BaseUrl $elect.leader.api_addr -Sql `
+                "INSERT INTO chaos_drill(phase, ts) VALUES('d1-after-stepdown', datetime('now'))"
+            Write-Event -Phase 'd1.write' -Data $w
+            # Confirm the old leader is back in the cluster as a follower.
+            $rsw = [System.Diagnostics.Stopwatch]::StartNew()
+            $followerOk = $false
+            while ($rsw.ElapsedMilliseconds -lt 15000 -and -not $followerOk) {
+                $nodes = Get-ClusterNodes -BaseUrl $elect.leader.api_addr
+                if ($nodes -and $nodes.$leaderId -and $nodes.$leaderId.reachable) {
+                    $followerOk = $true; break
+                }
+                Start-Sleep -Milliseconds 250
+            }
+            Write-Event -Phase 'd1.restored' -Data @{
+                old_leader = $leaderId
+                follower_ok = $followerOk
+                rejoin_ms   = [int]$rsw.ElapsedMilliseconds
+            }
+        } else {
+            Write-Event -Phase 'd1.fail' -Data @{ message = 'no new leader within timeout'; elapsed_ms = $elect.elapsed_ms }
+        }
+    }
+}
 
-            $other = $baseUrls | Where-Object { $_ -ne $initial.api_addr }
-            $elect = Wait-ForLeader -BaseUrls $other -TimeoutMs 30000 -NotEqualToId $leaderId
-            if ($elect.leader) {
-                Write-Event -Phase 'd1.reelected' -Data @{
-                    new_leader  = $elect.leader.id
-                    api         = $elect.leader.api_addr
-                    elapsed_ms  = $elect.elapsed_ms
-                }
-                $w = Invoke-Write -BaseUrl $elect.leader.api_addr -Sql `
-                    "INSERT INTO chaos_drill(phase, ts) VALUES('d1-after-failover', datetime('now'))"
-                Write-Event -Phase 'd1.write' -Data $w
-            } else {
-                Write-Event -Phase 'd1.fail' -Data @{ message = 'no new leader within timeout'; elapsed_ms = $elect.elapsed_ms }
+# --- Drill 1b: kill leader (hard, via Stop-Service) -----------------------
+# Process-level failure. Requires the leader's host to be local to this
+# driver, or reachable via SSH from the SYSTEM principal. Skipped with a
+# hint otherwise so the drill is not partially executed.
+if ($drillList -contains 'kill-leader-hard') {
+    Write-Event -Phase 'd1h.start' -Data @{ mode = 'stop-service' }
+    # Re-read the leader; a previous drill may have rotated it.
+    $current = $null
+    foreach ($u in $baseUrls) { $current = Get-Leader -BaseUrl $u; if ($current) { break } }
+    if (-not $current) {
+        Write-Event -Phase 'd1h.skip' -Data @{ reason = 'no leader visible' }
+    } else {
+        $leaderId = $current.id
+        $leaderVoter = $voterById[$leaderId]
+        if (-not $leaderVoter) {
+            Write-Event -Phase 'd1h.skip' -Data @{ reason = "leader id $leaderId not in cluster.yaml" }
+        } elseif (-not (Test-VoterIsLocal -Voter $leaderVoter) -and -not $leaderVoter.ssh_alias) {
+            Write-Event -Phase 'd1h.skip' -Data @{
+                reason   = 'leader is on a remote host with no ssh_alias from this driver'
+                leader   = $leaderId
+                host     = [string]$leaderVoter.host
+                hint     = 'set ssh_alias on this voter (reachable from the SYSTEM principal) to enable cross-host kill-leader-hard, or rely on the soft kill-leader drill'
             }
-        } finally {
+        } else {
             try {
-                $startMs = Invoke-VoterService -Voter $leaderVoter -Action 'Start'
-                $rejoinMs = -1
-                $rsw = [System.Diagnostics.Stopwatch]::StartNew()
-                while ($rsw.ElapsedMilliseconds -lt 30000) {
-                    foreach ($u in $baseUrls) {
-                        $nodes = Get-ClusterNodes -BaseUrl $u
-                        if ($nodes -and $nodes.$leaderId -and $nodes.$leaderId.reachable) {
-                            $rejoinMs = [int]$rsw.ElapsedMilliseconds; break
-                        }
+                $stopMs = Invoke-VoterService -Voter $leaderVoter -Action 'Stop'
+                Write-Event -Phase 'd1h.stopped' -Data @{
+                    service   = $leaderVoter.service
+                    ssh_alias = $leaderVoter.ssh_alias
+                    ms        = $stopMs
+                }
+
+                $other = $baseUrls | Where-Object { $_ -ne $current.api_addr }
+                $elect = Wait-ForLeader -BaseUrls $other -TimeoutMs 30000 -NotEqualToId $leaderId
+                if ($elect.leader) {
+                    Write-Event -Phase 'd1h.reelected' -Data @{
+                        new_leader  = $elect.leader.id
+                        api         = $elect.leader.api_addr
+                        elapsed_ms  = $elect.elapsed_ms
                     }
-                    if ($rejoinMs -ge 0) { break }
-                    Start-Sleep -Milliseconds 250
+                    $w = Invoke-Write -BaseUrl $elect.leader.api_addr -Sql `
+                        "INSERT INTO chaos_drill(phase, ts) VALUES('d1h-after-failover', datetime('now'))"
+                    Write-Event -Phase 'd1h.write' -Data $w
+                } else {
+                    Write-Event -Phase 'd1h.fail' -Data @{ message = 'no new leader within timeout'; elapsed_ms = $elect.elapsed_ms }
                 }
-                Write-Event -Phase 'd1.restored' -Data @{
-                    service    = $leaderVoter.service
-                    rejoin_ms  = $rejoinMs
-                    start_ms   = $startMs
+            } finally {
+                try {
+                    $startMs = Invoke-VoterService -Voter $leaderVoter -Action 'Start'
+                    $rejoinMs = -1
+                    $rsw = [System.Diagnostics.Stopwatch]::StartNew()
+                    while ($rsw.ElapsedMilliseconds -lt 30000) {
+                        foreach ($u in $baseUrls) {
+                            $nodes = Get-ClusterNodes -BaseUrl $u
+                            if ($nodes -and $nodes.$leaderId -and $nodes.$leaderId.reachable) {
+                                $rejoinMs = [int]$rsw.ElapsedMilliseconds; break
+                            }
+                        }
+                        if ($rejoinMs -ge 0) { break }
+                        Start-Sleep -Milliseconds 250
+                    }
+                    Write-Event -Phase 'd1h.restored' -Data @{
+                        service    = $leaderVoter.service
+                        rejoin_ms  = $rejoinMs
+                        start_ms   = $startMs
+                    }
+                } catch {
+                    Write-Event -Phase 'd1h.restore_error' -Data @{ error = $_.Exception.Message }
                 }
-            } catch {
-                Write-Event -Phase 'd1.restore_error' -Data @{ error = $_.Exception.Message }
             }
         }
     }
