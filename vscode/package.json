@@ -2,7 +2,7 @@
   "name": "forgewire-fabric",
   "displayName": "ForgeWire Fabric",
   "description": "Dispatch tasks to a ForgeWire Fabric compute mesh: signed envelopes, scope-bound capability tokens, live stream output. Run a hub or runner from inside VS Code on Windows, macOS, or Linux.",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "publisher": "DigitalHallucinations",
   "license": "Apache-2.0",
   "icon": "media/icon.png",
@@ -97,6 +97,56 @@
           "type": "number",
           "default": 8765,
           "description": "Default port used by 'ForgeWire: Start Hub Here'."
+        },
+        "forgewireFabric.cluster.repoRoot": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Filesystem path to the `forgewire-fabric` checkout containing `config/cluster.yaml` and `scripts/dr/`. Empty = auto-detect by walking up from the active workspace folder. Required only if you keep the repo outside any open workspace."
+        },
+        "forgewireFabric.cluster.preferredNode": {
+          "type": "string",
+          "default": "",
+          "description": "Override cluster.yaml's preferred_node for this machine when running DR / chaos installers from this UI. Empty = use cluster.yaml."
+        },
+        "forgewireFabric.dr.backup.cadenceMinutes": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "description": "How often the rqlite backup task runs. 0 = use cluster.yaml backups.cadence_minutes (5)."
+        },
+        "forgewireFabric.dr.backup.retentionHours": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "description": "How long to keep rqlite backup snapshots. 0 = use cluster.yaml backups.retention_hours (24)."
+        },
+        "forgewireFabric.dr.chaos.cadenceMinutes": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "markdownDescription": "How often the chaos drill task runs (24h = 1440). 0 = use cluster.yaml chaos.cadence_minutes (1440). **Lower values WILL show up as latency spikes on the hub.**"
+        },
+        "forgewireFabric.dr.chaos.drills": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Comma-separated drill list. Empty = use cluster.yaml `chaos.drills`. Available: `kill-leader`, `lose-quorum`, `partition-recovery` (manual; touches Windows Firewall)."
+        },
+        "forgewireFabric.dr.chaos.retentionDays": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "description": "How many days of chaos JSONL logs to keep. 0 = use cluster.yaml chaos.retention_days (30)."
+        },
+        "forgewireFabric.dr.chaos.principal": {
+          "type": "string",
+          "enum": ["SYSTEM", "user"],
+          "default": "SYSTEM",
+          "markdownDescription": "Windows principal the chaos scheduled task runs as. **SYSTEM** is recommended (no UAC prompts, full service-control rights). Choose **user** only if you cannot provision SSH keys for SYSTEM and need the task to inherit your user's `%USERPROFILE%\\.ssh` for cross-host drills."
+        },
+        "forgewireFabric.dr.chaos.force": {
+          "type": "boolean",
+          "default": false,
+          "description": "Bypass the single-driver guard when installing the chaos task on a host whose preferred_node differs from cluster.yaml chaos.driver_node. Leave false unless you know what you're doing."
         }
       }
     },
@@ -247,6 +297,48 @@
         "title": "Edit Hub Candidates…",
         "category": "ForgeWire Fabric",
         "icon": "$(list-tree)"
+      },
+      {
+        "command": "forgewireFabric.dr.installBackupTask",
+        "title": "DR: Install rqlite Backup Task on This Host",
+        "category": "ForgeWire Fabric",
+        "icon": "$(database)"
+      },
+      {
+        "command": "forgewireFabric.dr.installChaosTask",
+        "title": "DR: Install Chaos Drill Task on This Host",
+        "category": "ForgeWire Fabric",
+        "icon": "$(zap)"
+      },
+      {
+        "command": "forgewireFabric.dr.provisionSshForSystem",
+        "title": "DR: Provision SSH Key for SYSTEM (cross-host chaos)",
+        "category": "ForgeWire Fabric",
+        "icon": "$(key)"
+      },
+      {
+        "command": "forgewireFabric.dr.runChaosNow",
+        "title": "DR: Run Chaos Drill Now",
+        "category": "ForgeWire Fabric",
+        "icon": "$(play)"
+      },
+      {
+        "command": "forgewireFabric.dr.tailLastChaosLog",
+        "title": "DR: Open Last Chaos Drill Log",
+        "category": "ForgeWire Fabric",
+        "icon": "$(go-to-file)"
+      },
+      {
+        "command": "forgewireFabric.dr.openClusterYaml",
+        "title": "DR: Open cluster.yaml",
+        "category": "ForgeWire Fabric",
+        "icon": "$(json)"
+      },
+      {
+        "command": "forgewireFabric.dr.openSettings",
+        "title": "DR: Open Cluster & Chaos Settings",
+        "category": "ForgeWire Fabric",
+        "icon": "$(settings-gear)"
       }
     ],
     "viewsContainers": {
@@ -425,6 +517,27 @@
         },
         {
           "command": "forgewireFabric.editHubCandidates"
+        },
+        {
+          "command": "forgewireFabric.dr.installBackupTask"
+        },
+        {
+          "command": "forgewireFabric.dr.installChaosTask"
+        },
+        {
+          "command": "forgewireFabric.dr.provisionSshForSystem"
+        },
+        {
+          "command": "forgewireFabric.dr.runChaosNow"
+        },
+        {
+          "command": "forgewireFabric.dr.tailLastChaosLog"
+        },
+        {
+          "command": "forgewireFabric.dr.openClusterYaml"
+        },
+        {
+          "command": "forgewireFabric.dr.openSettings"
         }
       ]
     }

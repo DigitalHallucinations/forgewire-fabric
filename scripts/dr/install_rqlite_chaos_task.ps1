@@ -153,6 +153,31 @@ if ($driver -and -not $Force) {
     }
 }
 
+# ---- SSH-for-SYSTEM provisioning (automatic when running as SYSTEM) -------
+# When the chaos task runs under SYSTEM and a drill needs to reach a remote
+# voter, SYSTEM needs its own SSH key. We provision that here unless the
+# operator has opted out via cfg.chaos.ssh.provision_for_system=false or
+# selected -Principal user (in which case the user's own ~/.ssh applies).
+$sshCfg = $ch["ssh"]
+$provisionSsh = $true
+if ($sshCfg -and ($null -ne $sshCfg["provision_for_system"])) {
+    $val = $sshCfg["provision_for_system"]
+    if ($val -is [bool]) { $provisionSsh = $val }
+    elseif ([string]$val -in @("false","False","0","no","off")) { $provisionSsh = $false }
+}
+if ($Principal -ine "SYSTEM") { $provisionSsh = $false }
+if ($provisionSsh) {
+    $sshInstaller = Join-Path $RepoRoot "scripts\dr\install_ssh_for_system.ps1"
+    if (Test-Path $sshInstaller) {
+        Write-Host "Provisioning SSH identity for SYSTEM (cfg.chaos.ssh)..." -ForegroundColor Cyan
+        try {
+            & $sshInstaller -ConfigPath $ClusterYaml
+        } catch {
+            Write-Warning "SSH-for-SYSTEM provisioning failed: $($_.Exception.Message). Cross-host drills will skip with a hint until this is resolved."
+        }
+    }
+}
+
 # ---- Build action --------------------------------------------------------
 $argList = @(
     "-NoProfile", "-NonInteractive",

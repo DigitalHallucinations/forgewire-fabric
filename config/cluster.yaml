@@ -30,6 +30,11 @@ hub_protocol_version: 2
 # at the locations referenced by FORGEWIRE_HUB_TOKEN_FILE.
 
 voters:
+  # ssh_alias on each voter names an entry in chaos.ssh.aliases (below).
+  # chaos_drills.ps1 only consults ssh_alias when the voter's host is
+  # NOT local to the running driver; the local case is auto-detected by
+  # IP match against Get-NetIPAddress, so the same yaml works on every
+  # driver host without per-host edits.
   - label: node1
     node_id: node1-optiplex
     host: 10.120.81.95
@@ -39,7 +44,7 @@ voters:
     priority: 1
     tags: [primary, optiplex]
     service: ForgeWireRqliteNode1
-    ssh_alias: forgewire
+    ssh_alias: forgewire-optiplex
   - label: witness
     node_id: node3-witness
     host: 10.120.81.95
@@ -49,7 +54,7 @@ voters:
     priority: 2
     tags: [witness, optiplex]
     service: ForgeWireRqliteNode3
-    ssh_alias: forgewire
+    ssh_alias: forgewire-optiplex
   - label: node2
     node_id: node2-dell
     host: 10.120.81.56
@@ -59,11 +64,7 @@ voters:
     priority: 3
     tags: [secondary, dell]
     service: ForgeWireRqliteNode2
-    # ssh_alias left empty: chaos_drills.ps1 auto-detects this voter as
-    # local on Dell by IP match. From any other driver host you must set
-    # ssh_alias to an alias that reaches Dell, otherwise drills that
-    # target node2 will be skipped with an error logged to JSONL.
-    ssh_alias: ''
+    ssh_alias: forgewire-dell
 
 # Preferred control node for outbound operations issued *from this host*.
 # Override per-machine with the FORGEWIRE_PREFERRED_NODE env var or the
@@ -102,4 +103,27 @@ chaos:
   driver_node: node1
   log_root: 'C:\ProgramData\forgewire\rqlite-chaos'
   retention_days: 30
-  ssh_alias: forgewire
+
+  # SSH identity provisioning for the SYSTEM principal. The chaos task
+  # runs as SYSTEM, which has no SSH keys by default, so when a drill
+  # needs to Stop-Service on a remote voter it has nothing to
+  # authenticate with. install_rqlite_chaos_task.ps1 invokes
+  # install_ssh_for_system.ps1 to drop a key + ssh_config under
+  # %WINDIR%\System32\config\systemprofile\.ssh\ before registering the
+  # task. Set provision_for_system: false to opt out (drills will then
+  # cleanly skip with a hint when leadership lands on a remote voter).
+  ssh:
+    provision_for_system: true
+    # Path to the private key that will be copied. Must already have
+    # its public half in authorized_keys on every remote voter host.
+    # ~ resolves to the installing user's profile.
+    key_source: '~\.ssh\id_ed25519_forgewire'
+    # SSH config entries written into the SYSTEM ssh_config. Each
+    # remote voter host (deduped by hostname) needs one alias here.
+    aliases:
+      - alias: forgewire-optiplex
+        hostname: 10.120.81.95
+        user: jerem
+      - alias: forgewire-dell
+        hostname: 10.120.81.56
+        user: jerem

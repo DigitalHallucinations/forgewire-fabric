@@ -8,6 +8,7 @@
 
 import * as os from "os";
 import * as path from "path";
+import * as fs from "fs";
 import * as vscode from "vscode";
 import { HubClient } from "./hubClient";
 import { HubProvider, RunnersProvider, TasksProvider } from "./treeProviders";
@@ -78,7 +79,14 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<void> {
     vscode.commands.registerCommand("forgewireFabric.unpinHub", unpinHub),
     vscode.commands.registerCommand("forgewireFabric.promoteHub", promoteHub),
     vscode.commands.registerCommand("forgewireFabric.demoteHub", demoteHub),
-    vscode.commands.registerCommand("forgewireFabric.editHubCandidates", editHubCandidates)
+    vscode.commands.registerCommand("forgewireFabric.editHubCandidates", editHubCandidates),
+    vscode.commands.registerCommand("forgewireFabric.dr.installBackupTask", drInstallBackupTask),
+    vscode.commands.registerCommand("forgewireFabric.dr.installChaosTask", drInstallChaosTask),
+    vscode.commands.registerCommand("forgewireFabric.dr.provisionSshForSystem", drProvisionSshForSystem),
+    vscode.commands.registerCommand("forgewireFabric.dr.runChaosNow", drRunChaosNow),
+    vscode.commands.registerCommand("forgewireFabric.dr.tailLastChaosLog", drTailLastChaosLog),
+    vscode.commands.registerCommand("forgewireFabric.dr.openClusterYaml", drOpenClusterYaml),
+    vscode.commands.registerCommand("forgewireFabric.dr.openSettings", drOpenSettings)
   );
 
   ctx.subscriptions.push(
@@ -1239,5 +1247,249 @@ function settingsHtml(init: Record<string, unknown>): string {
 </script>
 </body>
 </html>`;
+}
+
+// ---------------------------------------------------------------------------
+// commands: DR + chaos automation (Windows-first)
+// ---------------------------------------------------------------------------
+
+function findClusterRepoRoot(): string | undefined {
+  const cfg = vscode.workspace.getConfiguration("forgewireFabric");
+  const explicit = (cfg.get<string>("cluster.repoRoot") ?? "").trim();
+  const candidates: string[] = [];
+  if (explicit) {
+    candidates.push(explicit);
+  }
+  for (const f of vscode.workspace.workspaceFolders ?? []) {
+    candidates.push(f.uri.fsPath);
+  }
+  for (const start of candidates) {
+    let cur = start;
+    for (let i = 0; i < 6; i++) {
+      const yaml = path.join(cur, "config", "cluster.yaml");
+      const drDir = path.join(cur, "scripts", "dr");
+      if (fs.existsSync(yaml) && fs.existsSync(drDir)) {
+        return cur;
+      }
+      const parent = path.dirname(cur);
+      if (parent === cur) break;
+      cur = parent;
+    }
+  }
+  return undefined;
+}
+
+async function requireRepoRoot(): Promise<string | undefined> {
+  const root = findClusterRepoRoot();
+  if (root) return root;
+  const pick = await vscode.window.showErrorMessage(
+    "Could not locate config/cluster.yaml under any open workspace folder. " +
+      "Set forgewireFabric.cluster.repoRoot or open the forgewire-fabric checkout.",
+    "Open Settings"
+  );
+  if (pick === "Open Settings") {
+    void vscode.commands.executeCommand(
+      "workbench.action.openSettings",
+      "forgewireFabric.cluster.repoRoot"
+    );
+  }
+  return undefined;
+}
+
+function pwshArgEscape(s: string): string {
+  // Single-quote for PowerShell; escape internal single quotes by doubling.
+  return `'${s.replace(/'/g, "''")}'`;
+}
+
+function runDrScriptInTerminal(
+  termName: string,
+  repoRoot: string,
+  scriptRel: string,
+  params: Record<string, string | number | boolean | undefined>
+): vscode.Terminal {
+  const term = getOrCreateTerminal(termName);
+  term.show();
+  const scriptPath = path.join(repoRoot, scriptRel);
+  const parts: string[] = [
+    "pwsh",
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    pwshArgEscape(scriptPath),
+  ];
+  for (const [k, v] of Object.entries(params)) {
+    if (v === undefined || v === null || v === "" || v === 0) continue;
+    if (typeof v === "boolean") {
+      if (v) parts.push(`-${k}`);
+    } else {
+      parts.push(`-${k}`, pwshArgEscape(String(v)));
+    }
+  }
+  term.sendText(parts.join(" "));
+  return term;
+}
+
+function ensureWindows(): boolean {
+  if (process.platform === "win32") return true;
+  vscode.window.showWarningMessage(
+    "This command targets the Windows ForgeWire DR/chaos pipeline (Task Scheduler + Stop-Service). On macOS/Linux, run the equivalent scripts/dr/*.ps1 manually."
+  );
+  return false;
+}
+
+async function drInstallBackupTask(): Promise<void> {
+  if (!ensureWindows()) return;
+  const root = await requireRepoRoot();
+  if (!root) return;
+  const cfg = vscode.workspace.getConfiguration("forgewireFabric");
+  const ok = await vscode.window.showInformationMessage(
+    "Install the rqlite DR backup scheduled task on this host?\n\n" +
+      "A UAC prompt will appear (Task Scheduler registration requires Administrator).",
+    { modal: true },
+    "Install"
+  );
+  if (ok !== "Install") return;
+  runDrScriptInTerminal(
+    "ForgeWire Fabric: install backup task",
+    root,
+    "scripts\\dr\\install_rqlite_backup_task.ps1",
+    {
+      PreferredNode: cfg.get<string>("cluster.preferredNode") ?? "",
+      CadenceMinutes: cfg.get<number>("dr.backup.cadenceMinutes") ?? 0,
+      RetentionHours: cfg.get<number>("dr.backup.retentionHours") ?? 0,
+    }
+  );
+}
+
+async function drInstallChaosTask(): Promise<void> {
+  if (!ensureWindows()) return;
+  const root = await requireRepoRoot();
+  if (!root) return;
+  const cfg = vscode.workspace.getConfiguration("forgewireFabric");
+  const ok = await vscode.window.showWarningMessage(
+    "Install the chaos drill scheduled task on this host?\n\n" +
+      "Drills cause real, observable Raft re-elections and brief write-refusal windows. " +
+      "Default cadence is 24h. Only the configured driver_node should run this task — " +
+      "the installer enforces the single-driver rule unless you set forgewireFabric.dr.chaos.force.",
+    { modal: true },
+    "Install"
+  );
+  if (ok !== "Install") return;
+  runDrScriptInTerminal(
+    "ForgeWire Fabric: install chaos task",
+    root,
+    "scripts\\dr\\install_rqlite_chaos_task.ps1",
+    {
+      CadenceMinutes: cfg.get<number>("dr.chaos.cadenceMinutes") ?? 0,
+      Drills: cfg.get<string>("dr.chaos.drills") ?? "",
+      RetentionDays: cfg.get<number>("dr.chaos.retentionDays") ?? 0,
+      Principal: cfg.get<string>("dr.chaos.principal") ?? "SYSTEM",
+      Force: cfg.get<boolean>("dr.chaos.force") ?? false,
+    }
+  );
+}
+
+async function drProvisionSshForSystem(): Promise<void> {
+  if (!ensureWindows()) return;
+  const root = await requireRepoRoot();
+  if (!root) return;
+  const ok = await vscode.window.showInformationMessage(
+    "Provision an SSH identity into the SYSTEM principal so chaos drills can " +
+      "Stop-Service across hosts?\n\n" +
+      "Reads cfg.chaos.ssh from cluster.yaml, copies the private key into " +
+      "%WINDIR%\\System32\\config\\systemprofile\\.ssh, writes a Host config, " +
+      "and (optionally) verifies SSH-as-SYSTEM with a one-shot scheduled task.",
+    { modal: true },
+    "Provision",
+    "Provision + Test"
+  );
+  if (!ok) return;
+  runDrScriptInTerminal(
+    "ForgeWire Fabric: provision SSH for SYSTEM",
+    root,
+    "scripts\\dr\\install_ssh_for_system.ps1",
+    { Test: ok === "Provision + Test" }
+  );
+}
+
+async function drRunChaosNow(): Promise<void> {
+  if (!ensureWindows()) return;
+  const root = await requireRepoRoot();
+  if (!root) return;
+  const cfg = vscode.workspace.getConfiguration("forgewireFabric");
+  const ok = await vscode.window.showWarningMessage(
+    "Trigger a chaos drill against the live cluster now?\n\n" +
+      "If the scheduled task ForgeWireRqliteChaos is registered on this host, " +
+      "it will be started (preferred path — runs as SYSTEM). Otherwise the " +
+      "script is invoked interactively and will UAC-prompt for elevation.",
+    { modal: true },
+    "Run"
+  );
+  if (ok !== "Run") return;
+  const term = getOrCreateTerminal("ForgeWire Fabric: chaos");
+  term.show();
+  // Try the scheduled task first; fall back to the script if missing.
+  const scriptPath = path.join(root, "scripts", "dr", "chaos_drills.ps1");
+  const drills = (cfg.get<string>("dr.chaos.drills") ?? "").trim();
+  const cmd =
+    `if (Get-ScheduledTask -TaskName ForgeWireRqliteChaos -ErrorAction SilentlyContinue) { ` +
+    `  Start-ScheduledTask -TaskName ForgeWireRqliteChaos; ` +
+    `  Write-Host 'Triggered ForgeWireRqliteChaos. Tail with: forgewireFabric.dr.tailLastChaosLog' -ForegroundColor Cyan ` +
+    `} else { ` +
+    `  pwsh -NoProfile -ExecutionPolicy Bypass -File ${pwshArgEscape(scriptPath)}` +
+    (drills ? ` -Drills ${pwshArgEscape(drills)}` : "") +
+    ` }`;
+  term.sendText(`pwsh -NoProfile -Command ${pwshArgEscape(cmd)}`);
+}
+
+async function drTailLastChaosLog(): Promise<void> {
+  if (!ensureWindows()) return;
+  const root = await requireRepoRoot();
+  if (!root) return;
+  // Default chaos log root is C:\ProgramData\forgewire\rqlite-chaos.
+  // Allow override via the cluster.yaml chaos.log_root by parsing it
+  // best-effort; if we can't, fall back to the documented default.
+  let logRoot = "C:\\ProgramData\\forgewire\\rqlite-chaos";
+  try {
+    const yaml = fs.readFileSync(path.join(root, "config", "cluster.yaml"), "utf8");
+    const m = yaml.match(/^\s*log_root:\s*['"]?([^'"\r\n]+)['"]?/m);
+    if (m) logRoot = m[1].trim();
+  } catch {
+    /* ignore — fall through */
+  }
+  if (!fs.existsSync(logRoot)) {
+    vscode.window.showWarningMessage(
+      `No chaos log directory at ${logRoot}. Run a drill first.`
+    );
+    return;
+  }
+  const files = fs
+    .readdirSync(logRoot)
+    .filter((f) => f.startsWith("chaos.") && f.endsWith(".jsonl"))
+    .map((f) => ({ f, m: fs.statSync(path.join(logRoot, f)).mtimeMs }))
+    .sort((a, b) => b.m - a.m);
+  if (files.length === 0) {
+    vscode.window.showWarningMessage(`No chaos.*.jsonl files in ${logRoot}.`);
+    return;
+  }
+  const latest = path.join(logRoot, files[0].f);
+  const doc = await vscode.workspace.openTextDocument(latest);
+  await vscode.window.showTextDocument(doc, { preview: false });
+}
+
+async function drOpenClusterYaml(): Promise<void> {
+  const root = await requireRepoRoot();
+  if (!root) return;
+  const yaml = path.join(root, "config", "cluster.yaml");
+  const doc = await vscode.workspace.openTextDocument(yaml);
+  await vscode.window.showTextDocument(doc, { preview: false });
+}
+
+async function drOpenSettings(): Promise<void> {
+  await vscode.commands.executeCommand(
+    "workbench.action.openSettings",
+    "forgewireFabric.cluster forgewireFabric.dr"
+  );
 }
 
