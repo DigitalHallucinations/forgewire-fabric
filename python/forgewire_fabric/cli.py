@@ -81,6 +81,14 @@ def hub() -> None:
 @click.option("--token-file", default=None, help="File containing the hub token.")
 @click.option("--mdns", is_flag=True, default=False, help="Advertise via mDNS on the LAN.")
 @click.option("--log-level", default="info")
+@click.option("--backend", type=click.Choice(["sqlite", "rqlite"]), default=None,
+              help="State backend. 'sqlite' = legacy single-node WAL (default). "
+                   "'rqlite' = Raft-replicated cluster.")
+@click.option("--rqlite-host", default=None, help="rqlite cluster member host (any node).")
+@click.option("--rqlite-port", type=int, default=None, help="rqlite HTTP API port (default 4001).")
+@click.option("--rqlite-consistency",
+              type=click.Choice(["none", "weak", "strong", "linearizable"]),
+              default=None, help="rqlite read consistency level for SELECTs.")
 def hub_start(
     host: str | None,
     port: int | None,
@@ -88,6 +96,10 @@ def hub_start(
     token_file: str | None,
     mdns: bool,
     log_level: str,
+    backend: str | None,
+    rqlite_host: str | None,
+    rqlite_port: int | None,
+    rqlite_consistency: str | None,
 ) -> None:
     from forgewire_fabric.hub.server import main as hub_main
 
@@ -103,6 +115,14 @@ def hub_start(
     if mdns:
         argv += ["--mdns"]
     argv += ["--log-level", log_level]
+    if backend:
+        argv += ["--backend", backend]
+    if rqlite_host:
+        argv += ["--rqlite-host", rqlite_host]
+    if rqlite_port is not None:
+        argv += ["--rqlite-port", str(rqlite_port)]
+    if rqlite_consistency:
+        argv += ["--rqlite-consistency", rqlite_consistency]
     hub_main(argv)
 
 

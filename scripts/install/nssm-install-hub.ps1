@@ -25,7 +25,11 @@ param(
     [string]$BindHost = "0.0.0.0",
     [string]$DbPath = "C:\ProgramData\forgewire\hub.sqlite3",
     [string]$DataDir = "C:\ProgramData\forgewire",
-    [string]$ServiceName = "ForgeWireHub"
+    [string]$ServiceName = "ForgeWireHub",
+    [ValidateSet("sqlite","rqlite")][string]$Backend = "sqlite",
+    [string]$RqliteHost = "",
+    [int]$RqlitePort = 4001,
+    [ValidateSet("none","weak","strong","linearizable")][string]$RqliteConsistency = "weak"
 )
 
 $ErrorActionPreference = "Stop"
@@ -91,7 +95,21 @@ $cliArgs = @(
     "--host", $BindHost,
     "--port", $Port,
     "--db-path", "`"$DbPath`""
-) -join " "
+)
+if ($Backend -eq "rqlite") {
+    if ([string]::IsNullOrWhiteSpace($RqliteHost)) {
+        throw "Backend=rqlite requires -RqliteHost (any cluster member host)."
+    }
+    $cliArgs += @(
+        "--backend", "rqlite",
+        "--rqlite-host", $RqliteHost,
+        "--rqlite-port", $RqlitePort,
+        "--rqlite-consistency", $RqliteConsistency
+    )
+} else {
+    $cliArgs += @("--backend", "sqlite")
+}
+$cliArgs = $cliArgs -join " "
 
 & nssm.exe set $ServiceName Application $PythonExe              | Out-Null
 & nssm.exe set $ServiceName AppParameters $cliArgs               | Out-Null
