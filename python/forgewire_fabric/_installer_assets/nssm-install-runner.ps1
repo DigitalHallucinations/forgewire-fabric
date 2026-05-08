@@ -27,7 +27,8 @@ param(
     [string]$ScopePrefixes = "",
     [int]$MaxConcurrent = 1,
     [string]$DataDir = "C:\ProgramData\forgewire",
-    [string]$ServiceName = "ForgeWireRunner"
+    [string]$ServiceName = "ForgeWireRunner",
+    [switch]$NoWatchdog
 )
 
 $ErrorActionPreference = "Stop"
@@ -144,3 +145,27 @@ try {
 }
 Write-Host "Service status: $status"
 Write-Host "Logs: $LogDir"
+
+# ---- Watchdog (belt-and-suspenders liveness) -----------------------------
+# NSSM only sees process death. The runner can be "Running" but its
+# heartbeat thread silently dead (DNS flap, hung httpx client, or a
+# 'runner not registered' loop after a hub state reset). Install the
+# hub-view-based liveness watchdog so it force-restarts the service
+# after N consecutive heartbeat staleness windows. Pass -NoWatchdog to
+# suppress.
+if (-not $NoWatchdog) {
+    $watchdog = Join-Path $PSScriptRoot "install-runner-watchdog.ps1"
+    if (Test-Path $watchdog) {
+        Write-Host ""
+        Write-Host "Installing runner liveness watchdog scheduled task..."
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $watchdog `
+            -ServiceName $ServiceName `
+            -HubUrl      $HubUrl `
+            -TokenFile   $TokenFile
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Watchdog install returned exit $LASTEXITCODE; service is up but auto-recovery is disabled."
+        }
+    } else {
+        Write-Warning "install-runner-watchdog.ps1 not found alongside this script ($watchdog); skipping watchdog install."
+    }
+}

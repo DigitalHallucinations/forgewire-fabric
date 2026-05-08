@@ -25,7 +25,12 @@ param(
     [string]$BindHost = "0.0.0.0",
     [string]$DbPath = "C:\ProgramData\forgewire\hub.sqlite3",
     [string]$DataDir = "C:\ProgramData\forgewire",
-    [string]$ServiceName = "ForgeWireHub"
+    [string]$ServiceName = "ForgeWireHub",
+    [ValidateSet("sqlite","rqlite")][string]$Backend = "sqlite",
+    [string]$RqliteHost = "",
+    [int]$RqlitePort = 4001,
+    [ValidateSet("none","weak","strong","linearizable")][string]$RqliteConsistency = "weak",
+    [switch]$NoWatchdog
 )
 
 $ErrorActionPreference = "Stop"
@@ -91,7 +96,21 @@ $cliArgs = @(
     "--host", $BindHost,
     "--port", $Port,
     "--db-path", "`"$DbPath`""
-) -join " "
+)
+if ($Backend -eq "rqlite") {
+    if ([string]::IsNullOrWhiteSpace($RqliteHost)) {
+        throw "Backend=rqlite requires -RqliteHost (any cluster member host)."
+    }
+    $cliArgs += @(
+        "--backend", "rqlite",
+        "--rqlite-host", $RqliteHost,
+        "--rqlite-port", $RqlitePort,
+        "--rqlite-consistency", $RqliteConsistency
+    )
+} else {
+    $cliArgs += @("--backend", "sqlite")
+}
+$cliArgs = $cliArgs -join " "
 
 & nssm.exe set $ServiceName Application $PythonExe              | Out-Null
 & nssm.exe set $ServiceName AppParameters $cliArgs               | Out-Null
@@ -149,3 +168,25 @@ Write-Host ""
 Write-Host "Hub URL:    http://${env:COMPUTERNAME}:${Port}"
 Write-Host "Token file: $TokenFile (RW only by SYSTEM + Administrators)"
 Write-Host "Logs:       $LogDir"
+
+# ---- Watchdog (belt-and-suspenders liveness) -----------------------------
+# The hub process supervised by NSSM can become silently unreachable on
+# Windows IOCP when the listening socket dies but the process keeps
+# running (WinError 64 / 'Accept failed'). Install the /healthz watchdog
+# scheduled task so it force-restarts the service after N consecutive
+# probe failures. Pass -NoWatchdog to suppress.
+if (-not $NoWatchdog) {
+    $watchdog = Join-Path $PSScriptRoot "install-hub-watchdog.ps1"
+    if (Test-Path $watchdog) {
+        Write-Host ""
+        Write-Host "Installing /healthz watchdog scheduled task..."
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $watchdog `
+            -ServiceName $ServiceName `
+            -HealthzUrl  "http://127.0.0.1:$Port/healthz"
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Watchdog install returned exit $LASTEXITCODE; service is up but auto-recovery is disabled."
+        }
+    } else {
+        Write-Warning "install-hub-watchdog.ps1 not found alongside this script ($watchdog); skipping watchdog install."
+    }
+}
