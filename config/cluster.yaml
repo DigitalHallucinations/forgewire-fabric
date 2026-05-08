@@ -1,0 +1,67 @@
+# ForgeWire rqlite cluster topology.
+#
+# This file is the single source of truth for which voters are reachable
+# from a given network and in what order. Every host (hubs, runners, DR
+# nodes) reads the same file and resolves cluster operations through it,
+# so that adding/removing/relocating a voter is one config edit instead
+# of N script edits.
+#
+# Each voter has:
+#   label        - short stable name used in logs, file paths, and CLI.
+#   host         - DNS name or IP reachable from the consumer.
+#   port         - rqlite HTTP API port.
+#   raft_port    - rqlite Raft port (informational, used by chaos tests).
+#   role         - "voter" | "non-voter" (Raft role).
+#   priority     - lower number = higher preference for control-plane
+#                  operations such as backup, /db/load, /db/execute.
+#                  Tie-broken by list order.
+#   tags         - free-form labels e.g. ["primary", "witness"].
+#
+# Consumer scripts default to picking the lowest-priority reachable
+# voter as the *preferred control node* and falling back to the rest
+# of the list in priority order. Followers are still safe targets for
+# /db/backup because rqlite proxies the request to the leader (the
+# `redirect=true` query string forces this).
+
+cluster_id: forgewire-prod-1
+hub_protocol_version: 2
+
+# Bearer-token paths are not stored here; they remain per-host secrets
+# at the locations referenced by FORGEWIRE_HUB_TOKEN_FILE.
+
+voters:
+  - label: node1
+    host: 10.120.81.95
+    port: 4001
+    raft_port: 4002
+    role: voter
+    priority: 1
+    tags: [primary, optiplex]
+  - label: witness
+    host: 10.120.81.95
+    port: 4011
+    raft_port: 4012
+    role: voter
+    priority: 2
+    tags: [witness, optiplex]
+  - label: node2
+    host: 10.120.81.56
+    port: 4001
+    raft_port: 4002
+    role: voter
+    priority: 3
+    tags: [secondary, dell]
+
+# Preferred control node for outbound operations issued *from this host*.
+# Override per-machine with the FORGEWIRE_PREFERRED_NODE env var or the
+# -PreferredNode argument on backup_rqlite.ps1 / load_rqlite.ps1.
+preferred_node: node1
+
+# Disaster-recovery defaults. Per-host installers (install_rqlite_backup_task.ps1)
+# read these unless the operator overrides on the command line.
+backups:
+  root: 'C:\ProgramData\forgewire\rqlite-backups'
+  cadence_minutes: 5
+  retention_hours: 24
+  min_bytes: 1024
+  timeout_seconds: 60
