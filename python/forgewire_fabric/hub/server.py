@@ -71,12 +71,22 @@ DEFAULT_PORT = 8765
 
 # Protocol/handshake version. The dispatcher and runner both ship this value
 # in /runners/register; the hub rejects any peer whose major version differs.
-PROTOCOL_VERSION = 2
+#
+# v0.4 (atomic bump): wire moves to v3 alongside the additive observability
+# fields. ``MIN_COMPATIBLE_PROTOCOL_VERSION`` stays at 2 so a hub restart
+# that lands before its runners doesn't lock the fleet out during a rolling
+# redeploy. Tighten to 3 once every runner is confirmed on v0.4+.
+PROTOCOL_VERSION = 3
 MIN_COMPATIBLE_PROTOCOL_VERSION = 2
 
 # Heartbeat / state machine thresholds.
 HEARTBEAT_DEGRADED_SECONDS = 45
 HEARTBEAT_OFFLINE_SECONDS = 120
+# v0.4: when a runner reports this many consecutive claim failures via
+# heartbeat, /runners marks it as 'degraded' even though heartbeats are
+# fresh. This catches the "claim loop wedged on 404" failure mode that
+# was previously silent in both the API and the UI.
+CLAIM_FAILURE_DEGRADED_THRESHOLD = 3
 SIGNATURE_MAX_SKEW_SECONDS = 300
 
 # Resource gate defaults (tasks may override via metadata).
@@ -285,6 +295,23 @@ class Blackboard:
         for col, decl in additions:
             if col not in existing:
                 conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} {decl}")
+
+        # v0.4: runner self-reported reliability counters. Surfaced on
+        # /runners so a stuck claim loop is visible in the UI.
+        runner_cols = {
+            r["name"]
+            for r in conn.execute("PRAGMA table_info(runners)").fetchall()
+        }
+        runner_additions = [
+            ("claim_failures_total", "INTEGER NOT NULL DEFAULT 0"),
+            ("claim_failures_consecutive", "INTEGER NOT NULL DEFAULT 0"),
+            ("last_claim_error", "TEXT"),
+            ("last_claim_error_at", "TEXT"),
+            ("heartbeat_failures_total", "INTEGER NOT NULL DEFAULT 0"),
+        ]
+        for col, decl in runner_additions:
+            if col not in runner_cols:
+                conn.execute(f"ALTER TABLE runners ADD COLUMN {col} {decl}")
 
         # M2.4: dispatcher registry. Mirror of ``runners`` but for the
         # other end of the protocol.
@@ -938,7 +965,13 @@ class Blackboard:
                     state            = 'online',
                     drain_requested  = 0,
                     metadata         = excluded.metadata,
-                    last_heartbeat   = excluded.last_heartbeat
+                    last_heartbeat   = excluded.last_heartbeat,
+                    -- v0.4: a fresh registration means the runner believes
+                    -- it just (re)attached to the hub. Reset reliability
+                    -- counters so /runners doesn't show stale failure
+                    -- numbers from the previous incarnation.
+                    claim_failures_consecutive = 0,
+                    last_claim_error           = NULL
                 WHERE runners.public_key = excluded.public_key
                 RETURNING runner_id
                 """,
@@ -1008,11 +1041,22 @@ class Blackboard:
         on_battery: bool,
         last_known_commit: str | None,
         nonce: str,
+        claim_failures_total: int | None = None,
+        claim_failures_consecutive: int | None = None,
+        last_claim_error: str | None = None,
+        heartbeat_failures_total: int | None = None,
     ) -> dict[str, Any]:
         now = _now_iso()
+        # When the runner reports a current claim error, stamp _at; when it
+        # reports an empty error (recovered), keep the historical _at so
+        # operators can still see when the last incident was.
+        last_claim_error_at_clause = (
+            "last_claim_error_at = CASE WHEN ? IS NOT NULL AND ? != '' "
+            "THEN ? ELSE last_claim_error_at END"
+        )
         with self._connect() as conn:
             cur = conn.execute(
-                """
+                f"""
                 UPDATE runners
                 SET last_heartbeat = ?,
                     cpu_load_pct   = ?,
@@ -1021,6 +1065,11 @@ class Blackboard:
                     on_battery     = ?,
                     last_known_commit = COALESCE(?, last_known_commit),
                     last_nonce     = ?,
+                    claim_failures_total       = COALESCE(?, claim_failures_total),
+                    claim_failures_consecutive = COALESCE(?, claim_failures_consecutive),
+                    last_claim_error           = ?,
+                    {last_claim_error_at_clause},
+                    heartbeat_failures_total   = COALESCE(?, heartbeat_failures_total),
                     state          = CASE
                                        WHEN drain_requested = 1 THEN 'draining'
                                        ELSE 'online'
@@ -1037,6 +1086,13 @@ class Blackboard:
                     1 if on_battery else 0,
                     last_known_commit,
                     nonce,
+                    claim_failures_total,
+                    claim_failures_consecutive,
+                    last_claim_error,
+                    last_claim_error,
+                    last_claim_error,
+                    now,
+                    heartbeat_failures_total,
                     runner_id,
                     nonce,
                 ),
@@ -1225,6 +1281,16 @@ class Blackboard:
         if age >= HEARTBEAT_OFFLINE_SECONDS:
             return "offline"
         if age >= HEARTBEAT_DEGRADED_SECONDS:
+            return "degraded"
+        # v0.4: a runner whose claim loop is stuck (e.g. signature/identity
+        # mismatch yielding repeated 404s) is heartbeating fine but unable
+        # to take work. Surface that as 'degraded' so /runners and the UI
+        # don't silently mislabel it as 'online'.
+        try:
+            consecutive = int(runner.get("claim_failures_consecutive") or 0)
+        except (TypeError, ValueError):
+            consecutive = 0
+        if consecutive >= CLAIM_FAILURE_DEGRADED_THRESHOLD:
             return "degraded"
         return "online"
 
@@ -1533,6 +1599,12 @@ class HeartbeatRequest(BaseModel):
     battery_pct: int | None = None
     on_battery: bool = False
     last_known_commit: str | None = None
+    # v0.4: additive runner self-reported reliability counters.
+    # Older runners simply omit these and the hub stores zeros.
+    claim_failures_total: int | None = None
+    claim_failures_consecutive: int | None = None
+    last_claim_error: str | None = None
+    heartbeat_failures_total: int | None = None
 
 
 class DrainRequest(BaseModel):
@@ -1640,9 +1712,11 @@ class DispatchTaskSignedRequest(DispatchTaskRequest):
 
 
 def create_app(config: BlackboardConfig) -> FastAPI:
+    from forgewire_fabric import __version__ as _pkg_version
+
     app = FastAPI(
         title="ForgeWire Fabric Hub",
-        version="0.1.0",
+        version=_pkg_version,
     )
     blackboard = Blackboard(
         config.db_path,
@@ -2168,6 +2242,10 @@ def create_app(config: BlackboardConfig) -> FastAPI:
                 on_battery=payload.on_battery,
                 last_known_commit=payload.last_known_commit,
                 nonce=payload.nonce,
+                claim_failures_total=payload.claim_failures_total,
+                claim_failures_consecutive=payload.claim_failures_consecutive,
+                last_claim_error=payload.last_claim_error,
+                heartbeat_failures_total=payload.heartbeat_failures_total,
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="runner not registered") from exc

@@ -67,9 +67,9 @@ from forgewire_fabric.runner.runner_capabilities import (
 
 LOGGER = logging.getLogger("forgewire_fabric.runner_mcp")
 
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 HEARTBEAT_INTERVAL_SECONDS = 20
-DEFAULT_VERSION = "0.1.0"
+DEFAULT_VERSION = "0.4.0"
 SELF_UPDATE_MIN_INTERVAL_SECONDS = 60
 
 

@@ -49,10 +49,10 @@ from forgewire_fabric.runner.runner_capabilities import (
 
 LOGGER = logging.getLogger("forgewire_fabric.runner.agent")
 
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 HEARTBEAT_INTERVAL_SECONDS = 20.0
 DEFAULT_POLL_INTERVAL_SECONDS = 5.0
-DEFAULT_RUNNER_VERSION = "0.1.0"
+DEFAULT_RUNNER_VERSION = "0.4.0"
 
 
 def _parse_csv(value: str | None) -> list[str]:
@@ -101,6 +101,14 @@ class RunnerSession:
     config: RunnerConfig
     tools: list[str] = field(default_factory=list)
     host: dict[str, Any] = field(default_factory=dict)
+    # Self-reported reliability counters. Reset to 0 on the next successful
+    # call. Surfaced to the hub via heartbeat so /runners can show it.
+    claim_failures_total: int = 0
+    claim_failures_consecutive: int = 0
+    last_claim_error: str | None = None
+    heartbeat_failures_total: int = 0
+    heartbeat_failures_consecutive: int = 0
+    last_heartbeat_error: str | None = None
 
     def __post_init__(self) -> None:
         if not self.tools:
@@ -159,6 +167,10 @@ class RunnerSession:
             "timestamp": ts,
             "nonce": nonce,
             "signature": signature,
+            "claim_failures_total": self.claim_failures_total,
+            "claim_failures_consecutive": self.claim_failures_consecutive,
+            "last_claim_error": self.last_claim_error,
+            "heartbeat_failures_total": self.heartbeat_failures_total,
             **sample_resources(),
         }
 
@@ -283,9 +295,18 @@ async def _heartbeat_loop(session: RunnerSession, *, stop: asyncio.Event) -> Non
             pass
         try:
             await session.client.heartbeat(session.runner_id, session.heartbeat_payload())
+            session.heartbeat_failures_consecutive = 0
+            session.last_heartbeat_error = None
         except BlackboardError as exc:
+            session.heartbeat_failures_total += 1
+            session.heartbeat_failures_consecutive += 1
+            session.last_heartbeat_error = str(exc)
             LOGGER.warning("heartbeat failed: %s", exc)
             if exc.status_code == 404:
+                LOGGER.warning(
+                    "hub does not know runner_id=%s; re-registering",
+                    session.runner_id,
+                )
                 await _register_with_retries(session)
 
 
@@ -327,8 +348,26 @@ async def _claim_loop(
     while not stop.is_set():
         try:
             response = await session.client.claim_task_v2(session.claim_payload())
+            session.claim_failures_consecutive = 0
+            session.last_claim_error = None
         except BlackboardError as exc:
+            session.claim_failures_total += 1
+            session.claim_failures_consecutive += 1
+            session.last_claim_error = str(exc)
             LOGGER.warning("claim failed: %s", exc)
+            # Symmetric to _heartbeat_loop: a 404 here means the hub forgot
+            # this runner_id (e.g. hub state reset, snapshot import, rqlite
+            # quorum loss replayed). Without re-registering the claim loop
+            # spins forever even though heartbeats may already be healing.
+            if exc.status_code == 404:
+                LOGGER.warning(
+                    "hub does not know runner_id=%s on claim; re-registering",
+                    session.runner_id,
+                )
+                try:
+                    await _register_with_retries(session)
+                except Exception:  # pragma: no cover - defensive
+                    LOGGER.exception("re-register on claim 404 failed")
             await _sleep_or_stop(stop, session.config.poll_interval_seconds)
             continue
         task = response.get("task")
