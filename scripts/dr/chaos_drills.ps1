@@ -352,15 +352,27 @@ if ($drillList -contains 'kill-leader-hard') {
     } else {
         $leaderId = $current.id
         $leaderVoter = $voterById[$leaderId]
+        $skipReason = $null
+        $skipData   = @{ leader = $leaderId; host = if ($leaderVoter) { [string]$leaderVoter.host } else { '' } }
         if (-not $leaderVoter) {
-            Write-Event -Phase 'd1h.skip' -Data @{ reason = "leader id $leaderId not in cluster.yaml" }
-        } elseif (-not (Test-VoterIsLocal -Voter $leaderVoter) -and -not $leaderVoter.ssh_alias) {
-            Write-Event -Phase 'd1h.skip' -Data @{
-                reason   = 'leader is on a remote host with no ssh_alias from this driver'
-                leader   = $leaderId
-                host     = [string]$leaderVoter.host
-                hint     = 'set ssh_alias on this voter (reachable from the SYSTEM principal) to enable cross-host kill-leader-hard, or rely on the soft kill-leader drill'
+            $skipReason = "leader id $leaderId not in cluster.yaml"
+        } elseif (-not (Test-VoterIsLocal -Voter $leaderVoter)) {
+            if (-not $leaderVoter.ssh_alias) {
+                $skipReason = 'leader is on a remote host with no ssh_alias from this driver'
+                $skipData['hint'] = 'set ssh_alias on this voter (reachable from the SYSTEM principal) to enable cross-host kill-leader-hard, or rely on the soft kill-leader drill'
+            } else {
+                # Probe ssh reachability before committing to Stop-Service.
+                & ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new $leaderVoter.ssh_alias 'exit' 2>$null | Out-Null
+                if ($LASTEXITCODE -ne 0) {
+                    $skipReason = 'ssh_alias is configured but ssh failed to connect within 5s'
+                    $skipData['ssh_alias'] = [string]$leaderVoter.ssh_alias
+                    $skipData['hint'] = 'verify inbound sshd on the target host and that the SYSTEM principal has its key under %WINDIR%\System32\config\systemprofile\.ssh, or rely on the soft kill-leader drill'
+                }
             }
+        }
+        if ($skipReason) {
+            $skipData['reason'] = $skipReason
+            Write-Event -Phase 'd1h.skip' -Data $skipData
         } else {
             try {
                 $stopMs = Invoke-VoterService -Voter $leaderVoter -Action 'Stop'
@@ -443,17 +455,39 @@ if ($drillList -contains 'lose-quorum') {
         }
 
         # Pre-flight: every voter we plan to stop must be controllable
-        # from this driver (local or has ssh_alias). Otherwise the drill
-        # would only partially execute and "lose-quorum" wouldn't.
-        $unreachable = @($toStop | Where-Object {
-            -not (Test-VoterIsLocal -Voter $_) -and -not $_.ssh_alias
-        })
+        # from this driver. Two failure modes to skip on:
+        #   1) Remote voter with no ssh_alias declared -> definitely unreachable.
+        #   2) Remote voter with ssh_alias but the alias actually fails to
+        #      connect (e.g. inbound sshd not running, firewall blocks 22).
+        # Either way we skip with a hint. Half-executing the drill would
+        # produce a misleading "lose-quorum" log of a single-voter outage
+        # while the cluster retained 2/3 quorum.
+        $unreachable = @()
+        $sshFailed   = @()
+        foreach ($v in $toStop) {
+            if (Test-VoterIsLocal -Voter $v) { continue }
+            if (-not $v.ssh_alias) {
+                $unreachable += $v
+                continue
+            }
+            # Probe reachability with a low-timeout, batch-mode ssh exec.
+            # BatchMode=yes prevents password prompts from hanging the drill.
+            & ssh -o BatchMode=yes -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new $v.ssh_alias 'exit' 2>$null | Out-Null
+            if ($LASTEXITCODE -ne 0) { $sshFailed += $v }
+        }
         $skipDrill = $false
         if ($unreachable.Count -gt 0) {
             Write-Event -Phase 'd2.skip' -Data @{
-                reason = 'one or more target voters are remote with no ssh_alias from this driver'
+                reason      = 'one or more target voters are remote with no ssh_alias from this driver'
                 unreachable = (@($unreachable) | ForEach-Object { $_.label })
-                hint   = 'set ssh_alias on those voters (reachable from the SYSTEM principal) to enable lose-quorum'
+                hint        = 'set ssh_alias on those voters (reachable from the SYSTEM principal) to enable lose-quorum'
+            }
+            $skipDrill = $true
+        } elseif ($sshFailed.Count -gt 0) {
+            Write-Event -Phase 'd2.skip' -Data @{
+                reason     = 'ssh_alias is configured but ssh failed to connect within 5s'
+                ssh_failed = (@($sshFailed) | ForEach-Object { @{ label = $_.label; alias = $_.ssh_alias; host = [string]$_.host } })
+                hint       = 'verify inbound sshd on the target host, that the SYSTEM principal has its key under %WINDIR%\System32\config\systemprofile\.ssh, and that the host firewall permits port 22 from this driver'
             }
             $skipDrill = $true
         }
