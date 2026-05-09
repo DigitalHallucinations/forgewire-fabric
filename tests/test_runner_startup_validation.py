@@ -3,9 +3,11 @@
 Both behaviors exist to keep the hub from routing work to a runner that
 *looks* healthy but cannot actually execute tasks:
 
-* ``RunnerConfig.from_env`` must reject a missing ``workspace_root`` so the
-  service fails to start instead of registering and then failing every
-  single shell spawn with ``WinError 267``.
+* ``RunnerConfig.from_env`` must auto-create an explicitly-configured
+  ``workspace_root`` if it is missing, so a service install + reboot
+  cycle does not get stuck on a directory the operator forgot to create.
+  When the env var is unset, fall back to ``os.getcwd()`` (which is
+  always an existing directory).
 * ``detect_tools`` must probe each candidate binary with its ``--version``
   argv before reporting it. The Windows ``py.exe`` launcher is on PATH for
   every account, but under accounts that have no installed Python (e.g.
@@ -24,16 +26,31 @@ from forgewire_fabric.runner.agent import RunnerConfig
 from forgewire_fabric.runner import runner_capabilities
 
 
-def test_from_env_rejects_missing_workspace_root(
+def test_from_env_creates_missing_workspace_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     missing = tmp_path / "nope" / "does-not-exist"
+    assert not missing.exists()
     monkeypatch.setenv("FORGEWIRE_RUNNER_WORKSPACE_ROOT", str(missing))
+    cfg = RunnerConfig.from_env()
+    assert cfg.workspace_root == str(missing)
+    assert missing.is_dir()
+
+
+def test_from_env_raises_when_creation_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "blocked"
+    monkeypatch.setenv("FORGEWIRE_RUNNER_WORKSPACE_ROOT", str(target))
+
+    def boom(*_a, **_k) -> None:
+        raise OSError("simulated permission denied")
+
+    monkeypatch.setattr(os, "makedirs", boom)
     with pytest.raises(RuntimeError) as excinfo:
         RunnerConfig.from_env()
-    msg = str(excinfo.value)
-    assert "FORGEWIRE_RUNNER_WORKSPACE_ROOT" in msg
-    assert "does-not-exist" in msg
+    assert "FORGEWIRE_RUNNER_WORKSPACE_ROOT" in str(excinfo.value)
+    assert "could not be created" in str(excinfo.value)
 
 
 def test_from_env_accepts_existing_workspace_root(
