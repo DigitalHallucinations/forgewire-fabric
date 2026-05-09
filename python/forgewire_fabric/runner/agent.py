@@ -52,7 +52,7 @@ LOGGER = logging.getLogger("forgewire_fabric.runner.agent")
 PROTOCOL_VERSION = 3
 HEARTBEAT_INTERVAL_SECONDS = 20.0
 DEFAULT_POLL_INTERVAL_SECONDS = 5.0
-DEFAULT_RUNNER_VERSION = "0.4.0"
+DEFAULT_RUNNER_VERSION = "0.4.1"
 
 
 def _parse_csv(value: str | None) -> list[str]:
@@ -73,9 +73,23 @@ class RunnerConfig:
 
     @classmethod
     def from_env(cls) -> "RunnerConfig":
+        workspace_root = (
+            os.environ.get("FORGEWIRE_RUNNER_WORKSPACE_ROOT") or os.getcwd()
+        )
+        # Fail fast: the runner spawns every shell task with
+        # ``cwd=workspace_root``. If the directory does not exist the
+        # subprocess call dies with ``WinError 267 (directory name is
+        # invalid)`` *after* the hub has already routed work to us, which
+        # the operator sees as a successful runner that fails every task.
+        # Surface the misconfiguration before we register.
+        if not os.path.isdir(workspace_root):
+            raise RuntimeError(
+                f"FORGEWIRE_RUNNER_WORKSPACE_ROOT does not exist: {workspace_root!r}. "
+                "Create the directory or correct the env var before starting "
+                "the runner."
+            )
         return cls(
-            workspace_root=os.environ.get("FORGEWIRE_RUNNER_WORKSPACE_ROOT")
-            or os.getcwd(),
+            workspace_root=workspace_root,
             tenant=os.environ.get("FORGEWIRE_RUNNER_TENANT") or None,
             tags=_parse_csv(os.environ.get("FORGEWIRE_RUNNER_TAGS")),
             scope_prefixes=_parse_csv(

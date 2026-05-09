@@ -41,7 +41,52 @@ def describe_host() -> dict[str, Any]:
 
 def detect_tools() -> list[str]:
     candidates = ["git", "python", "py", "pytest", "node", "npm", "rustc", "cargo", "go"]
-    return [t for t in candidates if shutil.which(t) is not None]
+    found: list[str] = []
+    for t in candidates:
+        if shutil.which(t) is None:
+            continue
+        if not _tool_works(t):
+            # Tool is on PATH but its --version probe fails (e.g. Windows
+            # ``py.exe`` launcher present but no installed Python visible to
+            # the running account, which exits 103/112 with "No installed
+            # Python found!"). Don't advertise capabilities we can't actually
+            # exercise -- the hub would route work to us and every task
+            # would die at the spawn step.
+            continue
+        found.append(t)
+    return found
+
+
+# Per-tool argv used to probe whether the binary can actually run as the
+# current account. ``--version`` is universally cheap and side-effect-free
+# for these tools.
+_TOOL_PROBE_ARGS: dict[str, list[str]] = {
+    "git": ["--version"],
+    "python": ["--version"],
+    "py": ["--version"],
+    "pytest": ["--version"],
+    "node": ["--version"],
+    "npm": ["--version"],
+    "rustc": ["--version"],
+    "cargo": ["--version"],
+    "go": ["version"],
+}
+
+
+def _tool_works(tool: str) -> bool:
+    args = _TOOL_PROBE_ARGS.get(tool, ["--version"])
+    try:
+        proc = subprocess.run(
+            [tool, *args],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            timeout=5,
+            check=False,
+        )
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        return False
+    return proc.returncode == 0
 
 
 def _ram_mb() -> int | None:
