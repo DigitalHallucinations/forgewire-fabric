@@ -495,6 +495,41 @@ def runner_uninstall() -> None:
     uninstall_runner()
 
 
+@cli.command(
+    "grant-service-control",
+    help=(
+        "Grant the invoking user (or --account) start/stop/pause rights on the "
+        "named Windows services so future bounces don't need elevation. "
+        "Per-service ACL only; no system-wide UAC change."
+    ),
+)
+@click.option(
+    "--service",
+    "services",
+    multiple=True,
+    default=(
+        "ForgeWireHub",
+        "ForgeWireRunner",
+        "ForgeWireRqliteNode1",
+        "ForgeWireRqliteNode2",
+        "ForgeWireRqliteNode3",
+    ),
+    help="Service short name. Repeatable. Missing services are skipped.",
+)
+@click.option(
+    "--account",
+    default=None,
+    help="DOMAIN\\user to grant rights to. Defaults to the invoking user.",
+)
+def grant_service_control_cmd(services: tuple[str, ...], account: str | None) -> None:
+    if not sys.platform.startswith("win"):
+        click.echo("grant-service-control is a Windows-only operation; nothing to do.")
+        return
+    from forgewire_fabric.install import grant_service_control
+
+    grant_service_control(list(services), account=account)
+
+
 # ---------------------------------------------------------------------------
 # mcp (VS Code MCP server registration)
 # ---------------------------------------------------------------------------

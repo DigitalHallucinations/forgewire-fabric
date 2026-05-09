@@ -225,3 +225,30 @@ def uninstall_runner() -> None:
         _macos_uninstall_plist("com.forgewire_fabric.runner.plist")
     else:
         raise SystemExit(f"Unsupported platform: {sys.platform}")
+
+
+def grant_service_control(services: list[str], account: str | None = None) -> None:
+    """Grant ``account`` start/stop/pause rights on each named Windows service.
+
+    Lets the invoking user bounce ForgeWire services from a normal,
+    non-elevated shell after a one-time UAC consent. Per-service ACL only;
+    no system-wide UAC change. No-op on non-Windows platforms.
+    """
+    if not sys.platform.startswith("win"):
+        return
+    if not services:
+        return
+    script = _asset("grant-service-control.ps1")
+    cmd = [
+        "powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        str(script),
+        "-Services",
+        ",".join(services),
+    ]
+    if account:
+        cmd += ["-Account", account]
+    subprocess.run(cmd, check=True, env=_powershell_env())

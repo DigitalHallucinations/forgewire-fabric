@@ -28,6 +28,8 @@ param(
     [int]$MaxConcurrent = 1,
     [string]$DataDir = "C:\ProgramData\forgewire",
     [string]$ServiceName = "ForgeWireRunner",
+    [string]$GrantControlTo = "",
+    [switch]$NoGrantControl,
     [switch]$NoWatchdog
 )
 
@@ -167,5 +169,25 @@ if (-not $NoWatchdog) {
         }
     } else {
         Write-Warning "install-runner-watchdog.ps1 not found alongside this script ($watchdog); skipping watchdog install."
+    }
+}
+
+# ---- Per-service ACL: let the invoking user start/stop without UAC -------
+# We are already elevated here. Grant the original (pre-elevation) caller
+# RP/WP/DT on this service so future bounces don't need elevation. Pass
+# -NoGrantControl to skip, or -GrantControlTo DOMAIN\user to override.
+if (-not $NoGrantControl) {
+    $grantScript = Join-Path $PSScriptRoot "grant-service-control.ps1"
+    if (Test-Path $grantScript) {
+        $target = if ($GrantControlTo) { $GrantControlTo } else { "$env:USERDOMAIN\$env:USERNAME" }
+        Write-Host ""
+        Write-Host "Granting $target start/stop/pause on $ServiceName (so future bounces skip UAC)..."
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $grantScript `
+            -Services $ServiceName -Account $target
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "grant-service-control returned exit $LASTEXITCODE; service is up but bounces will still need elevation."
+        }
+    } else {
+        Write-Warning "grant-service-control.ps1 not found alongside this script ($grantScript); skipping ACL grant."
     }
 }
