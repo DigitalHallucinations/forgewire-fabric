@@ -134,6 +134,12 @@ class BlackboardConfig:
     port: int
     min_runner_version: str = DEFAULT_MIN_RUNNER_VERSION
     require_signed_dispatch: bool = False
+    # M2.5.1 / M2.5.2: optional path to a ``policy.yaml`` consumed by
+    # :class:`forgewire_fabric.policy.HubDispatchGate`. ``None`` means the
+    # gate operates with an empty policy + zero budget, which is
+    # equivalent to permit-all but still emits structured
+    # :class:`PolicyDecision` records on every dispatch/completion.
+    policy_path: Path | None = None
     # Phase 2 (rqlite migration): "sqlite" keeps the legacy single-node
     # WAL backend (default for backward compat); "rqlite" routes all
     # statements to the rqlite cluster over HTTP. The two backends share
@@ -1730,6 +1736,30 @@ def create_app(config: BlackboardConfig) -> FastAPI:
     app.state.started_at = time.time()
     app.state.config = config
 
+    # ---- M2.5.1 + M2.5.2: hub-side policy + budget gate ----------------
+    from forgewire_fabric.policy import (
+        BudgetEnforcer,
+        BudgetPolicy,
+        CostLedger,
+        FabricPolicy,
+        FabricPolicyEngine,
+        HubDispatchGate,
+        load_policy_yaml,
+    )
+
+    if config.policy_path is not None and Path(config.policy_path).exists():
+        fabric_policy = load_policy_yaml(str(config.policy_path))
+    else:
+        fabric_policy = FabricPolicy()
+    app.state.cost_ledger = CostLedger()
+    app.state.gate = HubDispatchGate(
+        policy_engine=FabricPolicyEngine(fabric_policy),
+        budget_enforcer=BudgetEnforcer(
+            ledger=app.state.cost_ledger,
+            policy=BudgetPolicy(),
+        ),
+    )
+
     async def require_auth(request: Request) -> None:
         header = request.headers.get("authorization", "")
         if not header.lower().startswith("bearer "):
@@ -1946,6 +1976,11 @@ def create_app(config: BlackboardConfig) -> FastAPI:
                     "POST /tasks/v2 with a registered dispatcher key"
                 ),
             )
+        _enforce_dispatch_gate(
+            task_id=(payload.todo_id or payload.title),
+            scope_globs=payload.scope_globs,
+            branch=payload.branch,
+        )
         task = blackboard.create_task(
             title=payload.title,
             prompt=payload.prompt,
@@ -2001,6 +2036,52 @@ def create_app(config: BlackboardConfig) -> FastAPI:
         now = int(time.time())
         if abs(now - int(timestamp)) > SIGNATURE_MAX_SKEW_SECONDS:
             raise HTTPException(status_code=401, detail="timestamp out of skew window")
+
+    # ----- M2.5.1 + M2.5.2: dispatch / completion policy enforcement -----
+
+    def _enforce_dispatch_gate(
+        *,
+        task_id: str,
+        scope_globs: list[str],
+        branch: str | None,
+        dispatcher_id: str | None = None,
+    ) -> None:
+        from forgewire_fabric.policy import DispatchRequest
+
+        decision = app.state.gate.evaluate_dispatch(
+            DispatchRequest(
+                task_id=str(task_id),
+                scope_globs=list(scope_globs),
+                target_branch=branch,
+                dispatcher_id=dispatcher_id,
+            )
+        )
+        if decision.allowed:
+            return
+        # 403 for hard deny, 428 (Precondition Required) for approval gate.
+        status_code = 403 if decision.denied else 428
+        raise HTTPException(status_code=status_code, detail=decision.to_dict())
+
+    def _enforce_completion_gate(
+        *,
+        task_id: str,
+        changed_paths: list[str],
+    ) -> None:
+        from forgewire_fabric.policy import CompletionRequest
+
+        decision = app.state.gate.evaluate_completion(
+            CompletionRequest(
+                task_id=str(task_id),
+                changed_paths=list(changed_paths or ()),
+                diff_lines=0,
+            )
+        )
+        if decision.allowed or decision.needs_approval:
+            # On completion, REQUIRE_APPROVAL (e.g. protected branch) still
+            # allows the result envelope to land — the work happened. Hard
+            # DENY is the only path that refuses to record the result.
+            return
+        raise HTTPException(status_code=403, detail=decision.to_dict())
 
     # ----- M2.4: dispatcher registry / signed dispatch ---------------------
 
@@ -2077,6 +2158,12 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             )
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
+        _enforce_dispatch_gate(
+            task_id=(payload.todo_id or payload.title),
+            scope_globs=payload.scope_globs,
+            branch=payload.branch,
+            dispatcher_id=payload.dispatcher_id,
+        )
         return blackboard.create_task(
             title=payload.title,
             prompt=payload.prompt,
@@ -2393,6 +2480,10 @@ def create_app(config: BlackboardConfig) -> FastAPI:
     def submit_result(
         task_id: int, payload: ResultRequest
     ) -> dict[str, Any]:
+        _enforce_completion_gate(
+            task_id=str(task_id),
+            changed_paths=payload.files_touched,
+        )
         try:
             return blackboard.submit_result(
                 task_id=task_id,
@@ -2625,6 +2716,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         choices=("none", "weak", "strong", "linearizable"),
         help="rqlite read consistency level for SELECTs.",
     )
+    parser.add_argument(
+        "--policy-file",
+        default=os.environ.get("FORGEWIRE_HUB_POLICY_FILE"),
+        help=(
+            "Path to a policy.yaml consumed by HubDispatchGate (M2.5.1/M2.5.2). "
+            "When omitted the hub runs with an empty (permissive) policy and "
+            "still emits structured PolicyDecision records on dispatch/completion."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -2644,6 +2744,7 @@ def main(argv: list[str] | None = None) -> None:
         rqlite_host=args.rqlite_host,
         rqlite_port=args.rqlite_port,
         rqlite_consistency=args.rqlite_consistency,
+        policy_path=Path(args.policy_file).expanduser() if args.policy_file else None,
     )
     logging.basicConfig(
         level=args.log_level.upper(),
