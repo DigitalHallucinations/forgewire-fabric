@@ -12,6 +12,7 @@ __pycache__/
 *.dylib
 *.pyd
 .venv/
+.venv.old/
 venv/
 env/
 dist/
