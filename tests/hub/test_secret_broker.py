@@ -156,11 +156,14 @@ def test_broker_tampered_ciphertext_raises(tmp_path: Path) -> None:
         conn.commit()
     # Flip a byte in the stored ciphertext (past the 12-byte nonce so we
     # corrupt the ciphertext+tag and force an AES-GCM verification fail).
+    # Ciphertext is stored base64-encoded for rqlite wire compatibility.
+    import base64 as _b64
     with _conn(db) as conn:
-        row = conn.execute("SELECT ciphertext FROM GUARDED".replace("GUARDED", "secrets")).fetchone()
-        blob = bytearray(row["ciphertext"])
+        row = conn.execute("SELECT ciphertext FROM secrets WHERE name = ?", ("GUARDED",)).fetchone()
+        blob = bytearray(_b64.b64decode(row["ciphertext"]))
         blob[15] ^= 0xFF
-        conn.execute("UPDATE secrets SET ciphertext = ? WHERE name = ?", (bytes(blob), "GUARDED"))
+        tampered = _b64.b64encode(bytes(blob)).decode("ascii")
+        conn.execute("UPDATE secrets SET ciphertext = ? WHERE name = ?", (tampered, "GUARDED"))
         conn.commit()
     with _conn(db) as conn:
         with pytest.raises(PermissionError):

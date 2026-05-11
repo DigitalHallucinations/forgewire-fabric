@@ -47,6 +47,7 @@ Mocking policy: there is none. Tests use real AES-GCM against
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -221,6 +222,22 @@ class _ChainedKeyProvider:
 # ---------------------------------------------------------------------------
 
 
+def _coerce_ciphertext(stored: Any) -> bytes:
+    """Normalise a ciphertext column value back to raw bytes.
+
+    Ciphertext is written as base64-encoded TEXT so it round-trips over
+    the rqlite JSON wire (which cannot carry Python ``bytes`` params).
+    SQLite stores the value with TEXT affinity in that case. Older or
+    direct-SQLite rows that were written as a ``BLOB`` come back as
+    ``bytes``/``memoryview``; accept those too for forward compatibility.
+    """
+    if isinstance(stored, (bytes, bytearray, memoryview)):
+        return bytes(stored)
+    if isinstance(stored, str):
+        return base64.b64decode(stored.encode("ascii"))
+    raise TypeError(f"unexpected ciphertext column type: {type(stored).__name__}")
+
+
 class SecretBroker:
     """AES-GCM seal/open layer on top of a ``secrets`` SQL table.
 
@@ -292,6 +309,7 @@ class SecretBroker:
         if not value:
             raise ValueError("secret value must be non-empty")
         blob = self._encrypt(name, value)
+        b64 = base64.b64encode(blob).decode("ascii")
         existing = conn.execute(
             "SELECT version FROM secrets WHERE name = ?", (name,)
         ).fetchone()
@@ -301,7 +319,7 @@ class SecretBroker:
                 INSERT INTO secrets (name, ciphertext, version, created_at, updated_at)
                 VALUES (?, ?, 1, ?, ?)
                 """,
-                (name, blob, now_iso, now_iso),
+                (name, b64, now_iso, now_iso),
             )
             version = 1
         else:
@@ -312,7 +330,7 @@ class SecretBroker:
                    SET ciphertext = ?, version = ?, updated_at = ?
                  WHERE name = ?
                 """,
-                (blob, version, now_iso, name),
+                (b64, version, now_iso, name),
             )
         self._value_cache = None
         return {"name": name, "version": version, "updated_at": now_iso}
@@ -332,13 +350,14 @@ class SecretBroker:
             raise KeyError(name)
         version = int(existing["version"]) + 1
         blob = self._encrypt(name, value)
+        b64 = base64.b64encode(blob).decode("ascii")
         conn.execute(
             """
             UPDATE secrets
                SET ciphertext = ?, version = ?, updated_at = ?, last_rotated_at = ?
              WHERE name = ?
             """,
-            (blob, version, now_iso, now_iso, name),
+            (b64, version, now_iso, now_iso, name),
         )
         self._value_cache = None
         return {"name": name, "version": version, "last_rotated_at": now_iso}
@@ -379,10 +398,10 @@ class SecretBroker:
         ).fetchall()
         by_name = {r["name"]: r["ciphertext"] for r in rows}
         for name in names:
-            blob = by_name.get(name)
-            if blob is None:
+            stored = by_name.get(name)
+            if stored is None:
                 continue
-            out[name] = self._decrypt(name, bytes(blob))
+            out[name] = self._decrypt(name, _coerce_ciphertext(stored))
         return out
 
     # ----- redaction -----
@@ -398,7 +417,7 @@ class SecretBroker:
         for row in rows:
             name = row["name"]
             try:
-                cache[name] = self._decrypt(name, bytes(row["ciphertext"]))
+                cache[name] = self._decrypt(name, _coerce_ciphertext(row["ciphertext"]))
             except PermissionError as exc:  # corrupt row; skip with warning
                 LOGGER.warning("secret %r failed decrypt during cache load: %s", name, exc)
         self._value_cache = cache
