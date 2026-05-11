@@ -39,6 +39,74 @@ def describe_host() -> dict[str, Any]:
     }
 
 
+def describe_capabilities(
+    *,
+    host: dict[str, Any] | None = None,
+    tools: list[str] | None = None,
+    region: str | None = None,
+) -> dict[str, Any]:
+    """Build the structured capability blob the M2.5.4 matcher consumes.
+
+    Pure-stdlib derivation from already-collected facts (host snapshot +
+    detected tool list + a bit of ``platform`` lookup). The returned
+    shape is the canonical schema documented in
+    `phase-2.5-operator-control-plane.md` (M2.5.4):
+
+    .. code-block:: yaml
+
+        python: "3.13.1"
+        os: "windows-11"
+        cpu: { cores: 16, arch: "x86_64" }
+        ram_gb: 64
+        gpu: ["nvidia:rtx-..."]
+        toolchains: { rust: true, node: true, ... }
+        services: []
+        region: "homelab"
+        sandbox_profile: "bare"
+
+    Numeric values use the natural unit operators are most likely to
+    write against (``ram_gb >= 32``, ``cpu.cores >= 8``).
+    """
+    host = host or describe_host()
+    tools = tools if tools is not None else detect_tools()
+    ram_mb = host.get("ram_mb")
+    ram_gb = int(ram_mb / 1024) if isinstance(ram_mb, int) and ram_mb > 0 else None
+    raw_os = (host.get("os") or "").lower()
+    short_os = (
+        "windows-11" if "windows-11" in raw_os
+        else "windows-10" if "windows-10" in raw_os
+        else "windows" if raw_os.startswith("windows") or "windows" in raw_os
+        else "linux" if raw_os.startswith("linux") or "linux" in raw_os
+        else "macos" if "macos" in raw_os or "darwin" in raw_os
+        else raw_os.split("-", 1)[0] or "unknown"
+    )
+    py = ".".join(str(p) for p in platform.python_version_tuple()[:3])
+    toolchains = {t: True for t in tools if t in {"rust", "rustc", "cargo", "node", "npm", "go", "python", "py", "uv", "pytest"}}
+    # Normalise "rustc"/"cargo" -> "rust", "py"/"python" -> "python".
+    if "rustc" in toolchains or "cargo" in toolchains:
+        toolchains["rust"] = True
+    if "python" in toolchains or "py" in toolchains:
+        toolchains["python"] = True
+    blob: dict[str, Any] = {
+        "python": py,
+        "os": short_os,
+        "cpu": {"cores": int(host.get("cpu_count") or 1), "arch": host.get("arch") or "unknown"},
+        "toolchains": toolchains,
+        "services": [],
+        "sandbox_profile": "bare",
+    }
+    if ram_gb is not None:
+        blob["ram_gb"] = ram_gb
+    gpu = host.get("gpu")
+    if isinstance(gpu, str) and gpu:
+        blob["gpu"] = [gpu]
+    elif isinstance(gpu, list) and gpu:
+        blob["gpu"] = list(gpu)
+    if region:
+        blob["region"] = region
+    return blob
+
+
 def detect_tools() -> list[str]:
     candidates = ["git", "python", "py", "pytest", "node", "npm", "rustc", "cargo", "go"]
     found: list[str] = []

@@ -108,6 +108,12 @@ class BlackboardClient:
         assert result is not None
         return result["tasks"]
 
+    async def list_waiting_tasks(self) -> dict[str, Any]:
+        """M2.5.4: queued tasks no online runner can satisfy."""
+        result = await self._request("GET", "/tasks/waiting")
+        assert result is not None
+        return result
+
     async def get_task(self, task_id: int) -> dict[str, Any]:
         result = await self._request("GET", f"/tasks/{task_id}")
         assert result is not None

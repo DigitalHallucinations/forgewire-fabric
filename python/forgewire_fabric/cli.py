@@ -1039,6 +1039,18 @@ def tasks_show(task_id: int) -> None:
     _async(_go())
 
 
+@tasks.command(
+    "waiting",
+    help="List queued tasks no online runner can satisfy (M2.5.4).",
+)
+def tasks_waiting() -> None:
+    async def _go() -> None:
+        async with _client() as c:
+            _print_json(await c.list_waiting_tasks())
+
+    _async(_go())
+
+
 @tasks.command("stream", help="Tail a task's stream output (SSE).")
 @click.argument("task_id", type=int)
 def tasks_stream(task_id: int) -> None:
@@ -1065,6 +1077,32 @@ def runners_list() -> None:
     async def _go() -> None:
         async with _client() as c:
             _print_json(await c.list_runners())
+
+    _async(_go())
+
+
+@runners_group.command(
+    "caps",
+    help="Show advertised capability blob for one or all runners (M2.5.4).",
+)
+@click.option("--runner", "runner_filter", default=None, help="Limit to one runner_id.")
+def runners_caps(runner_filter: str | None) -> None:
+    async def _go() -> None:
+        async with _client() as c:
+            payload = await c.list_runners()
+        out = []
+        for r in payload.get("runners", []):
+            if runner_filter and r.get("runner_id") != runner_filter:
+                continue
+            out.append(
+                {
+                    "runner_id": r.get("runner_id"),
+                    "hostname": r.get("hostname"),
+                    "state": r.get("state"),
+                    "capabilities": r.get("capabilities") or {},
+                }
+            )
+        _print_json({"runners": out})
 
     _async(_go())
 

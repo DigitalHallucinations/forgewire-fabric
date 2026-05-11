@@ -59,6 +59,7 @@ from forgewire_fabric.hub._router import pick_task as _router_pick_task
 from forgewire_fabric.hub._streams import HAS_RUST as _HUB_STREAMS_HAS_RUST
 from forgewire_fabric.hub._streams import make_counter as _make_stream_counter
 from forgewire_fabric.hub import _rqlite_db
+from forgewire_fabric.hub.capability_matcher import match as _capability_match
 
 LOGGER = logging.getLogger("forgewire_fabric.hub")
 
@@ -306,6 +307,10 @@ class Blackboard:
             # M2.4: signed-dispatch column. Nullable so legacy bearer-only
             # dispatches keep working when require_signed_dispatch=False.
             ("dispatcher_id", "TEXT"),
+            # M2.5.4: structured capability predicates (json list of
+            # strings like ``"gpu.cuda >= 12"``). Empty list = match
+            # any runner (legacy behaviour).
+            ("required_capabilities", "TEXT NOT NULL DEFAULT '[]'"),
         ]
         for col, decl in additions:
             if col not in existing:
@@ -323,6 +328,10 @@ class Blackboard:
             ("last_claim_error", "TEXT"),
             ("last_claim_error_at", "TEXT"),
             ("heartbeat_failures_total", "INTEGER NOT NULL DEFAULT 0"),
+            # M2.5.4: structured capability blob shipped on
+            # /runners/register. JSON dict; missing/empty = legacy
+            # runner that only advertises tools/tags/host fields.
+            ("capabilities", "TEXT NOT NULL DEFAULT '{}'"),
         ]
         for col, decl in runner_additions:
             if col not in runner_cols:
@@ -811,6 +820,7 @@ class Blackboard:
         workspace_root: str | None = None,
         require_base_commit: bool = False,
         dispatcher_id: str | None = None,
+        required_capabilities: list[str] | None = None,
     ) -> dict[str, Any]:
         with self._connect() as conn:
             cur = conn.execute(
@@ -819,8 +829,8 @@ class Blackboard:
                     todo_id, title, prompt, scope_globs, base_commit, branch,
                     timeout_minutes, priority, metadata,
                     required_tools, required_tags, tenant, workspace_root,
-                    require_base_commit, dispatcher_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    require_base_commit, dispatcher_id, required_capabilities
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 RETURNING id
                 """,
                 (
@@ -839,6 +849,7 @@ class Blackboard:
                     workspace_root,
                     1 if require_base_commit else 0,
                     dispatcher_id,
+                    json.dumps(required_capabilities or []),
                 ),
             )
             row = cur.fetchone()
@@ -912,6 +923,9 @@ class Blackboard:
                 WHERE id = (
                     SELECT id FROM tasks
                     WHERE status = 'queued' AND cancel_requested = 0
+                      AND (required_capabilities IS NULL
+                           OR required_capabilities = ''
+                           OR required_capabilities = '[]')
                     ORDER BY priority DESC, id ASC
                     LIMIT 1
                 )
@@ -1343,8 +1357,8 @@ class Blackboard:
                     cpu_count, ram_mb, gpu, tools, tags, scope_prefixes,
                     tenant, workspace_root, runner_version, protocol_version,
                     max_concurrent, state, drain_requested, metadata,
-                    first_seen, last_heartbeat
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    first_seen, last_heartbeat, capabilities
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(runner_id) DO UPDATE SET
                     hostname         = excluded.hostname,
                     os               = excluded.os,
@@ -1364,6 +1378,7 @@ class Blackboard:
                     state            = 'online',
                     drain_requested  = 0,
                     metadata         = excluded.metadata,
+                    capabilities     = excluded.capabilities,
                     last_heartbeat   = excluded.last_heartbeat,
                     -- v0.4: a fresh registration means the runner believes
                     -- it just (re)attached to the hub. Reset reliability
@@ -1396,7 +1411,8 @@ class Blackboard:
                     0,
                     json.dumps(record.get("metadata", {})),
                     now,  # first_seen (only used on INSERT path)
-                    now,
+                    now,  # last_heartbeat
+                    json.dumps(record.get("capabilities", {})),
                 ),
             )
             if cur.fetchone() is None:
@@ -1775,6 +1791,7 @@ class Blackboard:
                 return None, info
             # Build candidate dicts the router facade can consume.
             candidates: list[dict[str, Any]] = []
+            candidate_caps_required: list[list[str]] = []
             for row in rows:
                 candidates.append(
                     {
@@ -1787,6 +1804,36 @@ class Blackboard:
                         "base_commit": row["base_commit"] or "",
                     }
                 )
+                try:
+                    reqs = json.loads(row["required_capabilities"] or "[]")
+                except (TypeError, ValueError, IndexError):
+                    reqs = []
+                candidate_caps_required.append(reqs if isinstance(reqs, list) else [])
+            # M2.5.4: drop tasks whose required_capabilities are not
+            # satisfied by this runner's structured capability blob.
+            try:
+                runner_caps_blob = json.loads(runner_row["capabilities"] or "{}")
+                if not isinstance(runner_caps_blob, dict):
+                    runner_caps_blob = {}
+            except (TypeError, ValueError, IndexError):
+                runner_caps_blob = {}
+            cap_filtered_indices: list[int] = []
+            cap_misses: list[dict[str, Any]] = []
+            for idx, reqs in enumerate(candidate_caps_required):
+                ok, missing = _capability_match(reqs, runner_caps_blob)
+                if ok:
+                    cap_filtered_indices.append(idx)
+                else:
+                    cap_misses.append(
+                        {"task_id": int(rows[idx]["id"]), "missing": missing}
+                    )
+            if not cap_filtered_indices:
+                info["reason"] = "waiting_for_capability"
+                info["candidates_seen"] = len(rows)
+                info["missing"] = cap_misses
+                return None, info
+            filtered_candidates = [candidates[i] for i in cap_filtered_indices]
+            filtered_rows = [rows[i] for i in cap_filtered_indices]
             runner_view = {
                 "scope_prefixes": scope_prefixes,
                 "tools": tools,
@@ -1795,9 +1842,11 @@ class Blackboard:
                 "workspace_root": workspace_root,
                 "last_known_commit": last_known_commit,
             }
-            picked_idx, candidates_seen = _router_pick_task(candidates, runner_view)
+            picked_idx, candidates_seen = _router_pick_task(
+                filtered_candidates, runner_view
+            )
             info["candidates_seen"] = candidates_seen
-            chosen = rows[picked_idx] if picked_idx is not None else None
+            chosen = filtered_rows[picked_idx] if picked_idx is not None else None
             if chosen is None:
                 info["reason"] = "no_eligible_runner"
                 return None, info
@@ -1863,6 +1912,12 @@ def _task_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         record["required_tools"] = json.loads(record["required_tools"])
     if "required_tags" in record and isinstance(record["required_tags"], str):
         record["required_tags"] = json.loads(record["required_tags"])
+    if "required_capabilities" in record and isinstance(
+        record["required_capabilities"], str
+    ):
+        record["required_capabilities"] = json.loads(
+            record["required_capabilities"]
+        )
     if "require_base_commit" in record:
         record["require_base_commit"] = bool(record["require_base_commit"])
     return record
@@ -1881,6 +1936,11 @@ def _runner_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     record["tags"] = json.loads(record["tags"])
     record["scope_prefixes"] = json.loads(record["scope_prefixes"])
     record["metadata"] = json.loads(record["metadata"])
+    if "capabilities" in record and isinstance(record["capabilities"], str):
+        try:
+            record["capabilities"] = json.loads(record["capabilities"] or "{}")
+        except (TypeError, ValueError):
+            record["capabilities"] = {}
     record["drain_requested"] = bool(record["drain_requested"])
     record["on_battery"] = bool(record["on_battery"])
     # Never leak internal nonce.
@@ -1936,6 +1996,11 @@ class DispatchTaskRequest(BaseModel):
     metadata: dict[str, Any] | None = None
     required_tools: list[str] | None = None
     required_tags: list[str] | None = None
+    # M2.5.4: structured capability predicates (e.g. ``"gpu.cuda >= 12"``,
+    # ``"toolchains.rust"``, ``"ram_gb >= 32"``). Empty/None means no
+    # capability gate. Kept out-of-band relative to the v2 signed
+    # canonical payload, mirroring required_tools/required_tags.
+    required_capabilities: list[str] | None = Field(default=None, max_length=64)
     tenant: str | None = None
     workspace_root: str | None = None
     require_base_commit: bool = False
@@ -1996,6 +2061,9 @@ class RegisterRequest(BaseModel):
     workspace_root: str | None = None
     max_concurrent: int = Field(default=1, ge=1, le=64)
     metadata: dict[str, Any] | None = None
+    # M2.5.4: structured capability blob the hub matches against
+    # ``required_capabilities`` predicates on each queued task.
+    capabilities: dict[str, Any] | None = None
     timestamp: int
     nonce: str = Field(..., min_length=8, max_length=80)
     signature: str
@@ -2403,6 +2471,7 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             tenant=payload.tenant,
             workspace_root=payload.workspace_root,
             require_base_commit=payload.require_base_commit,
+            required_capabilities=payload.required_capabilities,
         )
         _audit_dispatch(
             task,
@@ -2417,6 +2486,49 @@ def create_app(config: BlackboardConfig) -> FastAPI:
         status: str | None = None, limit: int = 100
     ) -> dict[str, Any]:
         return {"tasks": blackboard.list_tasks(status_filter=status, limit=limit)}
+
+    @app.get("/tasks/waiting", dependencies=[Depends(require_auth)])
+    def list_waiting_tasks() -> dict[str, Any]:
+        """List queued tasks whose ``required_capabilities`` are not
+        satisfied by any currently-online runner.
+
+        Returns ``{"tasks": [{task_id, title, branch, required_capabilities,
+        missing_per_runner: {runner_id: [reasons...]}}, ...]}``.
+        Tasks with no ``required_capabilities`` are omitted.
+        """
+        runners = blackboard.list_runners()
+        online = [
+            r for r in runners
+            if r.get("state") in ("online", "degraded")
+            and not r.get("drain_requested")
+        ]
+        out: list[dict[str, Any]] = []
+        for task in blackboard.list_tasks(status_filter="queued", limit=200):
+            reqs = task.get("required_capabilities") or []
+            if not reqs:
+                continue
+            satisfied_by: list[str] = []
+            misses: dict[str, list[str]] = {}
+            for r in online:
+                caps = r.get("capabilities") or {}
+                ok, missing = _capability_match(reqs, caps)
+                if ok:
+                    satisfied_by.append(r["runner_id"])
+                else:
+                    misses[r["runner_id"]] = missing
+            if satisfied_by:
+                # At least one runner could pick this up; not "waiting".
+                continue
+            out.append(
+                {
+                    "task_id": task["id"],
+                    "title": task.get("title"),
+                    "branch": task.get("branch"),
+                    "required_capabilities": reqs,
+                    "missing_per_runner": misses,
+                }
+            )
+        return {"tasks": out, "online_runners": [r["runner_id"] for r in online]}
 
     @app.get("/tasks/{task_id}", dependencies=[Depends(require_auth)])
     def get_task(task_id: int) -> dict[str, Any]:
@@ -2845,6 +2957,7 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             workspace_root=payload.workspace_root,
             require_base_commit=payload.require_base_commit,
             dispatcher_id=payload.dispatcher_id,
+            required_capabilities=payload.required_capabilities,
         )
         _audit_dispatch(
             task,
@@ -2918,6 +3031,7 @@ def create_app(config: BlackboardConfig) -> FastAPI:
                     "protocol_version": payload.protocol_version,
                     "max_concurrent": payload.max_concurrent,
                     "metadata": payload.metadata or {},
+                    "capabilities": payload.capabilities or {},
                 }
             )
         except PermissionError as exc:

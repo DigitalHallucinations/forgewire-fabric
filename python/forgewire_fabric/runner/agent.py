@@ -39,6 +39,7 @@ from forgewire_fabric.hub.client import (
 )
 from forgewire_fabric.runner.identity import RunnerIdentity, load_or_create
 from forgewire_fabric.runner.runner_capabilities import (
+    describe_capabilities,
     describe_host,
     detect_tools,
     fresh_nonce,
@@ -185,6 +186,7 @@ class RunnerSession:
             "workspace_root": self.config.workspace_root,
             "max_concurrent": self.config.max_concurrent,
             "metadata": {"flavor": "forgewire-runner"},
+            "capabilities": describe_capabilities(host=self.host, tools=self.tools),
             "timestamp": ts,
             "nonce": nonce,
             "signature": signature,
