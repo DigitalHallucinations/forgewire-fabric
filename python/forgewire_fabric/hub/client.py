@@ -275,6 +275,23 @@ class BlackboardClient:
         assert result is not None
         return result
 
+    # ---- M2.5.3: audit log -------------------------------------------------
+
+    async def audit_for_task(self, task_id: int) -> dict[str, Any]:
+        result = await self._request("GET", f"/audit/tasks/{task_id}")
+        assert result is not None
+        return result
+
+    async def audit_for_day(self, day: str) -> dict[str, Any]:
+        result = await self._request("GET", f"/audit/day/{day}")
+        assert result is not None
+        return result
+
+    async def audit_tail(self) -> dict[str, Any]:
+        result = await self._request("GET", "/audit/tail")
+        assert result is not None
+        return result
+
     async def append_stream(
         self, task_id: int, payload: dict[str, Any]
     ) -> dict[str, Any]:

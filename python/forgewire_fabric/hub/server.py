@@ -391,6 +391,42 @@ class Blackboard:
             "CREATE INDEX IF NOT EXISTS idx_approvals_envelope ON approvals(envelope_hash, status)"
         )
 
+        # M2.5.3: append-only, hash-chained audit log.
+        #
+        # Each row commits ``event_id_hash = sha256(prev_event_id_hash ||
+        # canonical_json(payload))`` so any tamper or omission breaks the
+        # chain on read. ``payload_json`` carries the event-specific body
+        # whose structure depends on ``kind``:
+        #   dispatch  -> {task_id, sealed_brief_hash, base_commit, branch,
+        #                 scope_globs, dispatcher_id, signed:bool,
+        #                 approval_id|null}
+        #   claim     -> {task_id, worker_id, hostname}
+        #   result    -> {task_id, worker_id, status, head_commit,
+        #                 commits, files_touched, output_commit_hash}
+        # Replay walks (dispatch, [claim, result]) tuples by ``task_id``.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS audit_event (
+                seq                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id_hash        TEXT NOT NULL UNIQUE,
+                prev_event_id_hash   TEXT NOT NULL,
+                kind                 TEXT NOT NULL,
+                task_id              INTEGER,
+                payload_json         TEXT NOT NULL,
+                created_at           TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_audit_task ON audit_event(task_id, seq)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_audit_kind ON audit_event(kind, seq)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_event(created_at)"
+        )
+
     # ----------------------------------------------------------------- labels
 
     def get_labels(self) -> dict[str, Any]:
@@ -597,6 +633,161 @@ class Blackboard:
             )
             conn.commit()
             return cur.rowcount > 0
+
+    # ----------------------------------------------------- audit (M2.5.3)
+
+    # Genesis hash: the chain's "previous hash" before any event is recorded.
+    # Using all-zero sha256 lets verifiers detect a missing genesis link.
+    AUDIT_GENESIS_HASH = "0" * 64
+
+    @staticmethod
+    def _audit_canonical(payload: Mapping[str, Any]) -> bytes:
+        """Canonical JSON used as input to the chain hash."""
+        return json.dumps(
+            payload, sort_keys=True, separators=(",", ":"), default=str
+        ).encode("utf-8")
+
+    @staticmethod
+    def _audit_event_hash(prev_hash: str, kind: str, payload: Mapping[str, Any]) -> str:
+        h = hashlib.sha256()
+        h.update(prev_hash.encode("ascii"))
+        h.update(b"|")
+        h.update(kind.encode("utf-8"))
+        h.update(b"|")
+        h.update(Blackboard._audit_canonical(payload))
+        return h.hexdigest()
+
+    def audit_chain_tail(self) -> str:
+        """Hash of the most recent audit event (or AUDIT_GENESIS_HASH)."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT event_id_hash FROM audit_event ORDER BY seq DESC LIMIT 1"
+            ).fetchone()
+        return row["event_id_hash"] if row is not None else self.AUDIT_GENESIS_HASH
+
+    def append_audit_event(
+        self,
+        *,
+        kind: str,
+        task_id: int | None,
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Append one event to the hash-chained audit log.
+
+        Concurrency: SQLite's BEGIN IMMEDIATE on the same connection
+        serialises tail-read + insert. On rqlite the Raft log already
+        serialises writes, but the tail-read is on the leader so a
+        chain race would still be possible if two appenders raced; we
+        accept that and rely on the unique index on ``event_id_hash``
+        to catch a collision.
+        """
+        with self._connect() as conn:
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError:
+                # rqlite does not support BEGIN IMMEDIATE; ignore.
+                pass
+            row = conn.execute(
+                "SELECT event_id_hash FROM audit_event ORDER BY seq DESC LIMIT 1"
+            ).fetchone()
+            prev_hash = (
+                row["event_id_hash"] if row is not None else self.AUDIT_GENESIS_HASH
+            )
+            event_hash = self._audit_event_hash(prev_hash, kind, payload)
+            conn.execute(
+                """
+                INSERT INTO audit_event (
+                    event_id_hash, prev_event_id_hash, kind, task_id,
+                    payload_json
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    event_hash,
+                    prev_hash,
+                    kind,
+                    int(task_id) if task_id is not None else None,
+                    json.dumps(dict(payload), sort_keys=True, default=str),
+                ),
+            )
+            conn.commit()
+        return {
+            "event_id_hash": event_hash,
+            "prev_event_id_hash": prev_hash,
+            "kind": kind,
+            "task_id": task_id,
+            "payload": dict(payload),
+        }
+
+    def audit_iter_task(self, task_id: int) -> list[dict[str, Any]]:
+        """Return all audit events for ``task_id`` in chain order."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM audit_event WHERE task_id = ? ORDER BY seq ASC",
+                (int(task_id),),
+            ).fetchall()
+        return [self._audit_row_to_dict(r) for r in rows]
+
+    def audit_iter_day(self, day: str) -> list[dict[str, Any]]:
+        """Return all audit events whose ``created_at`` falls on ``day``.
+
+        ``day`` is an ISO date string ``YYYY-MM-DD``. Note that the hub
+        records ``created_at`` in UTC (via SQLite's ``datetime('now')``),
+        so callers should pass a UTC date to avoid TZ-skew misses.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM audit_event
+                 WHERE date(created_at) = ?
+                 ORDER BY seq ASC
+                """,
+                (day,),
+            ).fetchall()
+        return [self._audit_row_to_dict(r) for r in rows]
+
+    @staticmethod
+    def _audit_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "seq": int(row["seq"]),
+            "event_id_hash": row["event_id_hash"],
+            "prev_event_id_hash": row["prev_event_id_hash"],
+            "kind": row["kind"],
+            "task_id": row["task_id"],
+            "payload": json.loads(row["payload_json"]),
+            "created_at": row["created_at"],
+        }
+
+    @staticmethod
+    def verify_audit_chain(events: Sequence[Mapping[str, Any]]) -> tuple[bool, str | None]:
+        """Re-hash the supplied events and confirm chain linkage.
+
+        Returns ``(ok, error)`` where ``error`` is None on success or a
+        human-readable description of the first broken link. The expected
+        starting prev_hash is ``AUDIT_GENESIS_HASH`` *only* when the first
+        event is genuinely the chain genesis; for partial slices (e.g. one
+        day's export) the caller should already trust the supplied
+        ``prev_event_id_hash`` of the first row and we therefore start
+        from that value.
+        """
+        prev = None
+        for ev in events:
+            if prev is None:
+                prev = ev["prev_event_id_hash"]
+            elif ev["prev_event_id_hash"] != prev:
+                return False, (
+                    f"chain break at seq={ev.get('seq')}: prev_event_id_hash "
+                    f"{ev['prev_event_id_hash']!r} != expected {prev!r}"
+                )
+            recomputed = Blackboard._audit_event_hash(
+                ev["prev_event_id_hash"], ev["kind"], ev["payload"]
+            )
+            if recomputed != ev["event_id_hash"]:
+                return False, (
+                    f"hash mismatch at seq={ev.get('seq')}: stored "
+                    f"{ev['event_id_hash']!r} != recomputed {recomputed!r}"
+                )
+            prev = ev["event_id_hash"]
+        return True, None
 
     # ----------------------------------------------------------------- tasks
 
@@ -2211,6 +2402,12 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             workspace_root=payload.workspace_root,
             require_base_commit=payload.require_base_commit,
         )
+        _audit_dispatch(
+            task,
+            signed=False,
+            dispatcher_id=None,
+            approval_id=payload.approval_id,
+        )
         return task
 
     @app.get("/tasks", dependencies=[Depends(require_auth)])
@@ -2233,6 +2430,7 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             hostname=payload.hostname,
             capabilities=payload.capabilities,
         )
+        _audit_claim(task, worker_id=payload.worker_id)
         # Always 200 with body. 204 cannot carry a body, and a missing body is
         # harder for clients to parse than the explicit {"task": null} envelope.
         return JSONResponse(content={"task": task})
@@ -2347,6 +2545,119 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             return
         raise HTTPException(status_code=403, detail=decision.to_dict())
 
+    # ----- M2.5.3: audit chain emit helpers --------------------------------
+
+    def _sealed_brief_hash(
+        *,
+        title: str,
+        prompt: str,
+        scope_globs: list[str],
+        base_commit: str,
+        branch: str,
+    ) -> str:
+        return hashlib.sha256(
+            json.dumps(
+                {
+                    "title": title,
+                    "prompt": prompt,
+                    "scope_globs": sorted(scope_globs),
+                    "base_commit": base_commit,
+                    "branch": branch,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+    def _audit_dispatch(
+        task: dict[str, Any],
+        *,
+        signed: bool,
+        dispatcher_id: str | None,
+        approval_id: str | None,
+    ) -> None:
+        try:
+            sealed = _sealed_brief_hash(
+                title=task.get("title", ""),
+                prompt=task.get("prompt", ""),
+                scope_globs=list(task.get("scope_globs") or []),
+                base_commit=task.get("base_commit", ""),
+                branch=task.get("branch", ""),
+            )
+            blackboard.append_audit_event(
+                kind="dispatch",
+                task_id=int(task["id"]),
+                payload={
+                    "task_id": int(task["id"]),
+                    "todo_id": task.get("todo_id"),
+                    "title": task.get("title"),
+                    "branch": task.get("branch"),
+                    "base_commit": task.get("base_commit"),
+                    "scope_globs": list(task.get("scope_globs") or []),
+                    "sealed_brief_hash": sealed,
+                    "dispatcher_id": dispatcher_id,
+                    "signed": signed,
+                    "approval_id": approval_id,
+                    "tenant": task.get("tenant"),
+                    "workspace_root": task.get("workspace_root"),
+                    "required_tools": list(task.get("required_tools") or []),
+                    "required_tags": list(task.get("required_tags") or []),
+                    "timeout_minutes": task.get("timeout_minutes"),
+                    "priority": task.get("priority"),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - audit must never block dispatch
+            logging.getLogger(__name__).warning(
+                "audit append failed for dispatch task=%s: %s",
+                task.get("id"),
+                exc,
+            )
+
+    def _audit_claim(task: dict[str, Any] | None, *, worker_id: str) -> None:
+        if task is None:
+            return
+        try:
+            blackboard.append_audit_event(
+                kind="claim",
+                task_id=int(task["id"]),
+                payload={
+                    "task_id": int(task["id"]),
+                    "worker_id": worker_id,
+                    "claimed_at": task.get("claimed_at"),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            logging.getLogger(__name__).warning(
+                "audit append failed for claim task=%s: %s",
+                task.get("id"),
+                exc,
+            )
+
+    def _audit_result(task: dict[str, Any], *, worker_id: str) -> None:
+        try:
+            result = task.get("result") or {}
+            blackboard.append_audit_event(
+                kind="result",
+                task_id=int(task["id"]),
+                payload={
+                    "task_id": int(task["id"]),
+                    "worker_id": worker_id,
+                    "status": result.get("status"),
+                    "head_commit": result.get("head_commit"),
+                    "commits": list(result.get("commits") or []),
+                    "files_touched": list(result.get("files_touched") or []),
+                    "test_summary": result.get("test_summary"),
+                    "error": result.get("error"),
+                    "reported_at": result.get("reported_at"),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            logging.getLogger(__name__).warning(
+                "audit append failed for result task=%s: %s",
+                task.get("id"),
+                exc,
+            )
+
     # ----- M2.5.1: approval queue HTTP surface -----------------------------
 
     @app.get("/approvals", dependencies=[Depends(require_auth)])
@@ -2407,6 +2718,32 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             raise HTTPException(status_code=404, detail="approval not found")
         except PermissionError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    # ----- M2.5.3: audit log read surface ---------------------------------
+
+    @app.get("/audit/tasks/{task_id}", dependencies=[Depends(require_auth)])
+    def audit_for_task(task_id: int) -> dict[str, Any]:
+        events = blackboard.audit_iter_task(task_id)
+        ok, err = Blackboard.verify_audit_chain(events)
+        return {"events": events, "verified": ok, "error": err}
+
+    @app.get("/audit/day/{day}", dependencies=[Depends(require_auth)])
+    def audit_for_day(day: str) -> dict[str, Any]:
+        # Validate the format up-front so we return 400 instead of crashing
+        # SQLite's ``datetime(?, '+1 day')`` modifier on garbage input.
+        try:
+            time.strptime(day, "%Y-%m-%d")
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400, detail="day must be YYYY-MM-DD"
+            ) from exc
+        events = blackboard.audit_iter_day(day)
+        ok, err = Blackboard.verify_audit_chain(events)
+        return {"day": day, "events": events, "verified": ok, "error": err}
+
+    @app.get("/audit/tail", dependencies=[Depends(require_auth)])
+    def audit_tail() -> dict[str, Any]:
+        return {"chain_tail": blackboard.audit_chain_tail()}
 
     # ----- M2.4: dispatcher registry / signed dispatch ---------------------
 
@@ -2490,7 +2827,7 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             dispatcher_id=payload.dispatcher_id,
             approval_id=payload.approval_id,
         )
-        return blackboard.create_task(
+        task = blackboard.create_task(
             title=payload.title,
             prompt=payload.prompt,
             scope_globs=payload.scope_globs,
@@ -2507,6 +2844,13 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             require_base_commit=payload.require_base_commit,
             dispatcher_id=payload.dispatcher_id,
         )
+        _audit_dispatch(
+            task,
+            signed=True,
+            dispatcher_id=payload.dispatcher_id,
+            approval_id=payload.approval_id,
+        )
+        return task
 
     @app.post("/runners/register", dependencies=[Depends(require_auth)])
     def register_runner(payload: RegisterRequest) -> dict[str, Any]:
@@ -2723,6 +3067,7 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="runner not registered") from exc
+        _audit_claim(task, worker_id=payload.runner_id)
         return JSONResponse(content={"task": task, "info": info})
 
     @app.post("/tasks/{task_id}/start", dependencies=[Depends(require_auth)])
@@ -2811,7 +3156,7 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             changed_paths=payload.files_touched,
         )
         try:
-            return blackboard.submit_result(
+            task = blackboard.submit_result(
                 task_id=task_id,
                 worker_id=payload.worker_id,
                 status_value=payload.status,
@@ -2828,6 +3173,8 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        _audit_result(task, worker_id=payload.worker_id)
+        return task
 
     @app.post("/tasks/{task_id}/notes", dependencies=[Depends(require_auth)])
     def post_note(task_id: int, payload: NoteRequest) -> dict[str, Any]:
