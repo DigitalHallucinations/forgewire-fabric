@@ -227,6 +227,31 @@ def test_default_identity_path_is_machine_scoped(
         importlib.reload(identity_mod)
 
 
+def _make_identity_payload(runner_id: str | None = None) -> dict[str, str]:
+    """Forge a structurally-valid identity record (matched keypair)."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    sk = Ed25519PrivateKey.generate()
+    sk_hex = sk.private_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PrivateFormat.Raw,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).hex()
+    pk_hex = sk.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    ).hex()
+    import uuid as _uuid
+
+    return {
+        "runner_id": runner_id or str(_uuid.uuid4()),
+        "public_key": pk_hex,
+        "private_key": sk_hex,
+        "created_at": "2026-01-01T00:00:00Z",
+    }
+
+
 def test_load_or_create_migrates_legacy_user_identity(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -236,12 +261,9 @@ def test_load_or_create_migrates_legacy_user_identity(
     machine_path = tmp_path / "machine" / "runner_identity.json"
     legacy_path = tmp_path / "user_home" / ".forgewire" / "runner_identity.json"
     legacy_path.parent.mkdir(parents=True)
-    legacy_payload = {
-        "runner_id": "11111111-2222-3333-4444-555555555555",
-        "public_key": "a" * 64,
-        "private_key": "b" * 64,
-        "created_at": "2026-01-01T00:00:00Z",
-    }
+    legacy_payload = _make_identity_payload(
+        "11111111-2222-3333-4444-555555555555"
+    )
     legacy_path.write_text(json.dumps(legacy_payload), encoding="utf-8")
 
     monkeypatch.setenv("FORGEWIRE_RUNNER_IDENTITY_PATH", str(machine_path))
@@ -258,3 +280,126 @@ def test_load_or_create_migrates_legacy_user_identity(
     finally:
         monkeypatch.delenv("FORGEWIRE_RUNNER_IDENTITY_PATH", raising=False)
         importlib.reload(identity_mod)
+
+
+# ---------------------------------------------------------------------------
+# Cross-machine migration (export / import)
+# ---------------------------------------------------------------------------
+
+
+def test_export_import_round_trip_preserves_runner_id(tmp_path: Path) -> None:
+    """The export/import pair is how operators preserve a runner_id when
+    physically replacing a host. The round-trip MUST be lossless.
+    """
+    src_path = tmp_path / "src.json"
+    src_ident = identity_mod.load_or_create(src_path)
+
+    exported = tmp_path / "exported.json"
+    record = identity_mod.export_identity(exported, source=src_path)
+    assert exported.exists()
+    assert record["runner_id"] == src_ident.runner_id
+
+    dst_path = tmp_path / "dst.json"
+    imported = identity_mod.import_identity(exported, target=dst_path)
+    assert imported.runner_id == src_ident.runner_id
+    assert imported.public_key_hex == src_ident.public_key_hex
+
+
+def test_import_refuses_to_overwrite_different_runner_id(tmp_path: Path) -> None:
+    src_path = tmp_path / "src.json"
+    dst_path = tmp_path / "dst.json"
+    src_ident = identity_mod.load_or_create(src_path)
+    dst_ident = identity_mod.load_or_create(dst_path)
+    assert src_ident.runner_id != dst_ident.runner_id
+
+    with pytest.raises(RuntimeError, match="refusing to overwrite"):
+        identity_mod.import_identity(src_path, target=dst_path)
+
+    # Existing identity untouched.
+    still = identity_mod.load_or_create(dst_path)
+    assert still.runner_id == dst_ident.runner_id
+
+
+def test_import_force_overwrites_different_runner_id(tmp_path: Path) -> None:
+    src_path = tmp_path / "src.json"
+    dst_path = tmp_path / "dst.json"
+    src_ident = identity_mod.load_or_create(src_path)
+    identity_mod.load_or_create(dst_path)
+
+    imported = identity_mod.import_identity(src_path, target=dst_path, force=True)
+    assert imported.runner_id == src_ident.runner_id
+
+
+def test_import_is_idempotent_for_same_runner_id(tmp_path: Path) -> None:
+    src_path = tmp_path / "src.json"
+    dst_path = tmp_path / "dst.json"
+    identity_mod.load_or_create(src_path)
+    # First import seeds dst.
+    identity_mod.import_identity(src_path, target=dst_path)
+    # Re-importing the same identity is a no-op-style success.
+    identity_mod.import_identity(src_path, target=dst_path)
+
+
+def test_import_rejects_mismatched_keypair(tmp_path: Path) -> None:
+    """A tampered or hand-crafted identity file whose private key does not
+    derive its public key is rejected outright.
+    """
+    bad_path = tmp_path / "bad.json"
+    payload = _make_identity_payload()
+    payload["public_key"] = "0" * 64
+    bad_path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="public_key does not match"):
+        identity_mod.import_identity(bad_path, target=tmp_path / "dst.json")
+
+
+def test_import_rejects_missing_fields(tmp_path: Path) -> None:
+    bad_path = tmp_path / "bad.json"
+    bad_path.write_text(json.dumps({"runner_id": "abc"}), encoding="utf-8")
+    with pytest.raises(ValueError, match="missing required fields"):
+        identity_mod.import_identity(bad_path, target=tmp_path / "dst.json")
+
+
+def test_imported_identity_round_trips_through_register(tmp_path: Path) -> None:
+    """End-to-end: a runner_id carried from machine A to machine B via
+    export/import registers cleanly against the hub and the resulting row
+    matches the imported id.
+    """
+    src_path = tmp_path / "src.json"
+    dst_path = tmp_path / "dst.json"
+    src_ident = identity_mod.load_or_create(src_path)
+    identity_mod.export_identity(tmp_path / "carry.json", source=src_path)
+    dst_ident = identity_mod.import_identity(
+        tmp_path / "carry.json", target=dst_path
+    )
+    assert dst_ident.runner_id == src_ident.runner_id
+
+    app = _make_app(tmp_path)
+    with TestClient(app) as c:
+        _register(c, dst_ident, hostname="NEW-HARDWARE")
+        r = c.get("/runners", headers=_auth())
+        runners = r.json()["runners"]
+        assert {row["runner_id"] for row in runners} == {src_ident.runner_id}
+
+
+# ---------------------------------------------------------------------------
+# Install-time bootstrap
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_identity_dir_creates_machine_wide_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "fresh-machine" / "forgewire" / "runner_identity.json"
+    monkeypatch.setenv("FORGEWIRE_RUNNER_IDENTITY_PATH", str(target))
+    mod = importlib.reload(identity_mod)
+    try:
+        result = mod.ensure_identity_dir()
+        assert result == target.parent
+        assert target.parent.is_dir()
+        # Idempotent.
+        mod.ensure_identity_dir()
+        assert target.parent.is_dir()
+    finally:
+        monkeypatch.delenv("FORGEWIRE_RUNNER_IDENTITY_PATH", raising=False)
+        importlib.reload(identity_mod)
+

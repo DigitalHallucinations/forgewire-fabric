@@ -96,6 +96,138 @@ def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+_IDENTITY_FIELDS = frozenset({"runner_id", "public_key", "private_key"})
+
+
+def _validate_identity_record(data: object) -> dict[str, str]:
+    """Validate the on-disk identity JSON and return a normalized dict.
+
+    Identity files are operator-portable (used by ``runner identity import``
+    when migrating a runner role to a new machine); we therefore validate
+    structure and key lengths rather than trusting the bytes blindly.
+    """
+    if not isinstance(data, dict):
+        raise ValueError("identity file must contain a JSON object")
+    missing = _IDENTITY_FIELDS - data.keys()
+    if missing:
+        raise ValueError(f"identity file missing required fields: {sorted(missing)}")
+    runner_id = str(data["runner_id"]).strip()
+    public_key = str(data["public_key"]).strip().lower()
+    private_key = str(data["private_key"]).strip().lower()
+    # Parse as UUID to reject obviously malformed ids.
+    uuid.UUID(runner_id)
+    if len(public_key) != 64 or len(private_key) != 64:
+        raise ValueError("public/private key must be 32 raw bytes (64 hex chars)")
+    bytes.fromhex(public_key)
+    bytes.fromhex(private_key)
+    # Cross-check that the private key actually derives the public key.
+    sk = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(private_key))
+    derived = sk.public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    ).hex()
+    if derived != public_key:
+        raise ValueError("identity file public_key does not match private_key")
+    return {
+        "runner_id": runner_id,
+        "public_key": public_key,
+        "private_key": private_key,
+        "created_at": str(data.get("created_at") or _now_iso()),
+    }
+
+
+def _atomic_write_identity(target: Path, record: dict[str, str]) -> None:
+    """Write the identity record to ``target`` atomically with 0600 perms."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_suffix(target.suffix + f".tmp.{os.getpid()}")
+    tmp.write_text(json.dumps(record, indent=2), encoding="utf-8")
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        # Windows: chmod is a no-op; ACL inheritance from ProgramData
+        # already restricts write to SYSTEM/Administrators.
+        pass
+    os.replace(tmp, target)
+
+
+def ensure_identity_dir(path: Path | None = None) -> Path:
+    """Create the machine-wide identity directory if missing.
+
+    Called by ``install_runner`` so a service installed under a different
+    OS account than the original installer still resolves to a writable,
+    machine-scoped directory. Returns the resolved directory path.
+
+    On Windows, ``%PROGRAMDATA%\\forgewire`` inherits ACLs that grant
+    SYSTEM and Administrators full control plus authenticated users read,
+    which is the right shape for a service identity store.
+    """
+    target = (path or DEFAULT_IDENTITY_PATH).expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return target.parent
+
+
+def export_identity(
+    destination: Path | None = None,
+    *,
+    source: Path | None = None,
+) -> dict[str, str]:
+    """Return (and optionally write) the current runner identity.
+
+    Used during hardware migration: export from the retiring machine,
+    transfer to the replacement, then ``import_identity`` there. The
+    private key is included by design — this file is the runner's
+    cryptographic identity and is meaningless without it.
+
+    ``destination`` is written atomically with 0600 perms when provided.
+    Returns the identity dict regardless.
+    """
+    src = (source or DEFAULT_IDENTITY_PATH).expanduser()
+    if not src.exists():
+        # Allow exporting a freshly-minted identity by triggering creation.
+        load_or_create(src if source is not None else None)
+    data = json.loads(src.read_text(encoding="utf-8"))
+    record = _validate_identity_record(data)
+    if destination is not None:
+        _atomic_write_identity(destination.expanduser(), record)
+    return record
+
+
+def import_identity(
+    source: Path,
+    *,
+    target: Path | None = None,
+    force: bool = False,
+) -> RunnerIdentity:
+    """Install an exported identity file as this machine's runner identity.
+
+    Refuses to overwrite an existing identity whose ``runner_id`` differs
+    from the incoming one unless ``force=True``; an identical ``runner_id``
+    is treated as idempotent and overwritten silently (covers re-runs of
+    the migration step). Always atomic.
+    """
+    src = source.expanduser()
+    if not src.exists():
+        raise FileNotFoundError(f"identity source not found: {src}")
+    record = _validate_identity_record(json.loads(src.read_text(encoding="utf-8")))
+    dst = (target or DEFAULT_IDENTITY_PATH).expanduser()
+    if dst.exists() and not force:
+        existing = _validate_identity_record(
+            json.loads(dst.read_text(encoding="utf-8"))
+        )
+        if existing["runner_id"] != record["runner_id"]:
+            raise RuntimeError(
+                "refusing to overwrite existing runner identity "
+                f"{existing['runner_id']!r} with {record['runner_id']!r}; "
+                "rerun with --force to confirm"
+            )
+    _atomic_write_identity(dst, record)
+    return RunnerIdentity(
+        runner_id=record["runner_id"],
+        public_key_hex=record["public_key"],
+        _private_key_hex=record["private_key"],
+    )
+
+
 def load_or_create(path: Path | None = None) -> RunnerIdentity:
     """Return the persisted identity, creating it on first use.
 
@@ -113,23 +245,26 @@ def load_or_create(path: Path | None = None) -> RunnerIdentity:
         ):
             if legacy.exists():
                 try:
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_text(
-                        legacy.read_text(encoding="utf-8"), encoding="utf-8"
+                    record = _validate_identity_record(
+                        json.loads(legacy.read_text(encoding="utf-8"))
                     )
-                except OSError:
-                    # If we can't write to the machine-wide path (no perms),
-                    # fall back to the legacy path so we don't mint a fresh
-                    # runner_id on every restart. The deployer is expected
-                    # to fix permissions; we degrade gracefully meanwhile.
+                    _atomic_write_identity(target, record)
+                except (OSError, ValueError):
+                    # If we can't write to the machine-wide path (no perms)
+                    # or the legacy file is corrupt, fall back to using
+                    # the legacy path so we don't mint a fresh runner_id
+                    # on every restart. The deployer is expected to fix
+                    # permissions; we degrade gracefully meanwhile.
                     target = legacy
                 break
     if target.exists():
-        data = json.loads(target.read_text(encoding="utf-8"))
+        record = _validate_identity_record(
+            json.loads(target.read_text(encoding="utf-8"))
+        )
         return RunnerIdentity(
-            runner_id=str(data["runner_id"]),
-            public_key_hex=str(data["public_key"]),
-            _private_key_hex=str(data["private_key"]),
+            runner_id=record["runner_id"],
+            public_key_hex=record["public_key"],
+            _private_key_hex=record["private_key"],
         )
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -154,11 +289,7 @@ def load_or_create(path: Path | None = None) -> RunnerIdentity:
         "private_key": sk_bytes.hex(),
         "created_at": _now_iso(),
     }
-    target.write_text(json.dumps(record, indent=2), encoding="utf-8")
-    try:
-        os.chmod(target, 0o600)
-    except OSError:
-        pass
+    _atomic_write_identity(target, record)
     return RunnerIdentity(
         runner_id=record["runner_id"],
         public_key_hex=record["public_key"],

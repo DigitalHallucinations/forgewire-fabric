@@ -478,6 +478,62 @@ def runner_identity(path: str | None) -> None:
     )
 
 
+@runner.command(
+    "identity-export",
+    help=(
+        "Export this runner's identity (incl. private key) to a portable "
+        "JSON file. Use to preserve runner_id across hardware migration: "
+        "export from the retiring host, then 'runner identity-import' on "
+        "the replacement before installing the service."
+    ),
+)
+@click.option("--output", "output", default=None,
+              help="Destination file. Omit to print to stdout.")
+@click.option("--source", default=None,
+              help="Source identity file (default: machine-wide).")
+def runner_identity_export(output: str | None, source: str | None) -> None:
+    from forgewire_fabric.runner.identity import export_identity
+
+    record = export_identity(
+        destination=Path(output) if output else None,
+        source=Path(source) if source else None,
+    )
+    if output:
+        _print_json({"exported_to": output, "runner_id": record["runner_id"]})
+    else:
+        _print_json(record)
+
+
+@runner.command(
+    "identity-import",
+    help=(
+        "Install a previously-exported identity as this machine's runner "
+        "identity. Refuses to overwrite a different existing runner_id "
+        "unless --force."
+    ),
+)
+@click.argument("source", type=click.Path(exists=True, dir_okay=False))
+@click.option("--target", default=None,
+              help="Destination identity file (default: machine-wide).")
+@click.option("--force", is_flag=True, default=False,
+              help="Overwrite an existing different runner_id.")
+def runner_identity_import(source: str, target: str | None, force: bool) -> None:
+    from forgewire_fabric.runner.identity import import_identity
+
+    ident = import_identity(
+        Path(source),
+        target=Path(target) if target else None,
+        force=force,
+    )
+    _print_json(
+        {
+            "runner_id": ident.runner_id,
+            "public_key": ident.public_key_hex,
+            "imported_from": source,
+        }
+    )
+
+
 @runner.command("install", help="Install the runner as an OS service (NSSM/systemd/launchd).")
 @click.option("--hub-url", required=True, envvar="FORGEWIRE_HUB_URL")
 @click.option("--hub-token", required=True, envvar="FORGEWIRE_HUB_TOKEN")

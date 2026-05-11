@@ -206,6 +206,14 @@ def uninstall_hub() -> None:
 
 
 def install_runner(*, hub_url: str, hub_token: str, workspace_root: str) -> None:
+    # Bootstrap the machine-wide identity directory before the service
+    # starts so the runner — regardless of the OS account it runs under —
+    # always resolves the same identity file on this host. This is what
+    # prevents an upgrade or service-account change from minting a new
+    # runner_id.
+    from forgewire_fabric.runner.identity import ensure_identity_dir
+
+    ensure_identity_dir()
     if sys.platform.startswith("win"):
         _windows_install_runner(hub_url=hub_url, hub_token=hub_token, workspace_root=workspace_root)
     elif sys.platform.startswith("linux"):
