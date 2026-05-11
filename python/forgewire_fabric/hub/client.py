@@ -298,6 +298,32 @@ class BlackboardClient:
         assert result is not None
         return result
 
+    # ---- M2.5.5a: secret broker -------------------------------------------
+
+    async def put_secret(self, *, name: str, value: str) -> dict[str, Any]:
+        """Create-or-rotate a sealed secret by ``name``.
+
+        Returns ``{"secret": {...metadata...}, "rotated": bool}``. The
+        ``value`` is never echoed back; the only way to retrieve it is
+        a runner claim that lists ``name`` in ``secrets_needed``.
+        """
+        result = await self._request(
+            "POST", "/secrets", json={"name": name, "value": value}
+        )
+        assert result is not None
+        return result
+
+    async def list_secrets(self) -> list[dict[str, Any]]:
+        """Return secret metadata only (names + versions + timestamps)."""
+        result = await self._request("GET", "/secrets")
+        assert result is not None
+        return result["secrets"]
+
+    async def delete_secret(self, name: str) -> dict[str, Any]:
+        result = await self._request("DELETE", f"/secrets/{name}")
+        assert result is not None
+        return result
+
     async def append_stream(
         self, task_id: int, payload: dict[str, Any]
     ) -> dict[str, Any]:

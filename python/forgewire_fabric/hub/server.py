@@ -60,6 +60,10 @@ from forgewire_fabric.hub._streams import HAS_RUST as _HUB_STREAMS_HAS_RUST
 from forgewire_fabric.hub._streams import make_counter as _make_stream_counter
 from forgewire_fabric.hub import _rqlite_db
 from forgewire_fabric.hub.capability_matcher import match as _capability_match
+from forgewire_fabric.hub.secret_broker import (
+    SecretBroker,
+    default_key_provider as _default_secret_key_provider,
+)
 
 LOGGER = logging.getLogger("forgewire_fabric.hub")
 
@@ -181,6 +185,7 @@ class Blackboard:
         rqlite_host: str = "127.0.0.1",
         rqlite_port: int = 4001,
         rqlite_consistency: str = "strong",
+        secrets_backend: str | None = None,
     ) -> None:
         if backend not in ("sqlite", "rqlite"):
             raise ValueError(f"unknown backend {backend!r}")
@@ -245,6 +250,12 @@ class Blackboard:
         # restart and re-primes lazily from MAX(seq) in SQLite, so kill -9
         # is safe.
         self._stream_counter = _make_stream_counter()
+        # M2.5.5a: hub-side sealed secret broker. Master key is lazily
+        # loaded on first put/get; missing key file is auto-generated on
+        # first secret put.
+        self._secret_broker = SecretBroker(
+            _default_secret_key_provider(db_path=db_path, backend=secrets_backend)
+        )
 
     # ------------------------------------------------------------------ infra
 
@@ -311,6 +322,18 @@ class Blackboard:
             # strings like ``"gpu.cuda >= 12"``). Empty list = match
             # any runner (legacy behaviour).
             ("required_capabilities", "TEXT NOT NULL DEFAULT '[]'"),
+            # M2.5.5a: declared secret names the runner needs in its
+            # task env (e.g. ``["GITHUB_TOKEN"]``). Hub looks these up
+            # at claim time and injects plaintext into the claim
+            # response, while only the *names* are recorded in the
+            # audit log. Empty list = no secrets requested.
+            ("secrets_needed", "TEXT NOT NULL DEFAULT '[]'"),
+            # M2.5.5b: per-task network egress policy. JSON object of
+            # the form ``{"allow": ["pypi.org", ...], "extra_hosts":
+            # [...]}``. Empty/None = no egress restriction (legacy
+            # default). ``extra_hosts`` triggers the M2.5.1 approval
+            # gate.
+            ("network_egress", "TEXT"),
         ]
         for col, decl in additions:
             if col not in existing:
@@ -436,6 +459,9 @@ class Blackboard:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_event(created_at)"
         )
+
+        # M2.5.5a: sealed secret broker storage.
+        SecretBroker.init_schema(conn)
 
     # ----------------------------------------------------------------- labels
 
@@ -800,6 +826,38 @@ class Blackboard:
             prev = ev["event_id_hash"]
         return True, None
 
+    # --------------------------------------------------------------- secrets
+
+    def put_secret(self, *, name: str, value: str) -> dict[str, Any]:
+        with self._connect() as conn:
+            return self._secret_broker.put(
+                conn, name=name, value=value, now_iso=_now_iso()
+            )
+
+    def rotate_secret(self, *, name: str, value: str) -> dict[str, Any]:
+        with self._connect() as conn:
+            return self._secret_broker.rotate(
+                conn, name=name, value=value, now_iso=_now_iso()
+            )
+
+    def delete_secret(self, *, name: str) -> bool:
+        with self._connect() as conn:
+            return self._secret_broker.delete(conn, name=name)
+
+    def list_secrets(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            return SecretBroker.list_metadata(conn)
+
+    def resolve_secrets(self, names: list[str]) -> dict[str, str]:
+        if not names:
+            return {}
+        with self._connect() as conn:
+            return self._secret_broker.resolve(conn, names=names)
+
+    def redact_text(self, text: str | None) -> str | None:
+        """Apply secret-value redaction to runner-supplied text payloads."""
+        return self._secret_broker.redact(text, conn_factory=self._connect)
+
     # ----------------------------------------------------------------- tasks
 
     def create_task(
@@ -821,6 +879,8 @@ class Blackboard:
         require_base_commit: bool = False,
         dispatcher_id: str | None = None,
         required_capabilities: list[str] | None = None,
+        secrets_needed: list[str] | None = None,
+        network_egress: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         with self._connect() as conn:
             cur = conn.execute(
@@ -829,8 +889,9 @@ class Blackboard:
                     todo_id, title, prompt, scope_globs, base_commit, branch,
                     timeout_minutes, priority, metadata,
                     required_tools, required_tags, tenant, workspace_root,
-                    require_base_commit, dispatcher_id, required_capabilities
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    require_base_commit, dispatcher_id, required_capabilities,
+                    secrets_needed, network_egress
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 RETURNING id
                 """,
                 (
@@ -850,6 +911,8 @@ class Blackboard:
                     1 if require_base_commit else 0,
                     dispatcher_id,
                     json.dumps(required_capabilities or []),
+                    json.dumps(secrets_needed or []),
+                    json.dumps(network_egress) if network_egress else None,
                 ),
             )
             row = cur.fetchone()
@@ -1017,6 +1080,11 @@ class Blackboard:
     ) -> dict[str, Any]:
         if status_value not in {"done", "failed", "cancelled", "timed_out"}:
             raise ValueError(f"invalid terminal status: {status_value}")
+        # M2.5.5a: scrub any active secret values from runner-supplied
+        # log/error/test-summary text before persisting.
+        log_tail = self.redact_text(log_tail)
+        error = self.redact_text(error)
+        test_summary = self.redact_text(test_summary)
         now = _now_iso()
         with self._connect() as conn:
             # Ownership-CAS via UPDATE...RETURNING. If no row matches the
@@ -1091,6 +1159,8 @@ class Blackboard:
         in one round-trip. ``RETURNING`` surfaces the assigned ``id``
         and ``seq`` so the caller never needs a follow-up read.
         """
+        # M2.5.5a: scrub any active secret values from the message body.
+        message = self.redact_text(message) or ""
         now = _now_iso()
         files_json = json.dumps(files_touched or [])
         with self._connect() as conn:
@@ -1208,6 +1278,9 @@ class Blackboard:
     ) -> dict[str, Any]:
         if channel not in {"stdout", "stderr", "info"}:
             raise ValueError(f"invalid stream channel: {channel}")
+        # M2.5.5a: redact secret values from streamed log lines before
+        # they hit the WAL.
+        line = self.redact_text(line) or ""
         with self._connect() as conn:
             # Worker-ownership check is read-only; no BEGIN IMMEDIATE needed.
             row = conn.execute(
@@ -1294,7 +1367,7 @@ class Blackboard:
             for entry in entries:
                 seq = self._stream_counter.next_seq(task_id)
                 assigned.append(
-                    (task_id, seq, str(entry["channel"]), str(entry["line"]))
+                    (task_id, seq, str(entry["channel"]), str(self.redact_text(entry["line"]) or ""))
                 )
 
             conn.execute("BEGIN IMMEDIATE")
@@ -1918,6 +1991,16 @@ def _task_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         record["required_capabilities"] = json.loads(
             record["required_capabilities"]
         )
+    if "secrets_needed" in record and isinstance(record["secrets_needed"], str):
+        try:
+            record["secrets_needed"] = json.loads(record["secrets_needed"] or "[]")
+        except (TypeError, ValueError):
+            record["secrets_needed"] = []
+    if "network_egress" in record and isinstance(record["network_egress"], str):
+        try:
+            record["network_egress"] = json.loads(record["network_egress"] or "null")
+        except (TypeError, ValueError):
+            record["network_egress"] = None
     if "require_base_commit" in record:
         record["require_base_commit"] = bool(record["require_base_commit"])
     return record
@@ -2001,6 +2084,17 @@ class DispatchTaskRequest(BaseModel):
     # capability gate. Kept out-of-band relative to the v2 signed
     # canonical payload, mirroring required_tools/required_tags.
     required_capabilities: list[str] | None = Field(default=None, max_length=64)
+    # M2.5.5a: declared secret names (e.g. ``["GITHUB_TOKEN"]``). Hub
+    # resolves these at claim time and attaches plaintext to the claim
+    # response so the runner can put them in its task env. Only the
+    # names are audit-logged (never the values). Out-of-band of the v2
+    # signed canonical payload — bearer-gated, same precedent as
+    # required_tools/required_tags/required_capabilities.
+    secrets_needed: list[str] | None = Field(default=None, max_length=32)
+    # M2.5.5b: per-task egress policy. ``allow`` is the userspace-proxy
+    # allowlist; ``extra_hosts`` is the requested superset that must
+    # clear an M2.5.1 approval gate before becoming effective.
+    network_egress: dict[str, Any] | None = None
     tenant: str | None = None
     workspace_root: str | None = None
     require_base_commit: bool = False
@@ -2130,6 +2224,26 @@ class ResultRequest(BaseModel):
 class NoteRequest(BaseModel):
     author: str = Field(..., min_length=1, max_length=80)
     body: str = Field(..., min_length=1)
+
+
+# ---- M2.5.5a: secret broker --------------------------------------------
+
+
+class SecretPutRequest(BaseModel):
+    """``POST /secrets`` body. ``put + rotate`` share the path; if ``name``
+    already exists the broker rotates it (bumps version + updates
+    ``last_rotated_at``) instead of inserting.
+
+    ``name`` is shouty-snake (matches the conventional env-var shape we
+    expect runners to consume). The broker is more permissive about the
+    on-disk row, but at the wire boundary we are strict so that the
+    audit log of secret *names* stays readable.
+    """
+
+    name: str = Field(
+        ..., min_length=1, max_length=64, pattern=r"^[A-Z_][A-Z0-9_]*$"
+    )
+    value: str = Field(..., min_length=1, max_length=8192)
 
 
 # ---- M2.4: dispatcher signing ---------------------------------------------
@@ -2472,6 +2586,8 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             workspace_root=payload.workspace_root,
             require_base_commit=payload.require_base_commit,
             required_capabilities=payload.required_capabilities,
+            secrets_needed=payload.secrets_needed,
+            network_egress=payload.network_egress,
         )
         _audit_dispatch(
             task,
@@ -2716,6 +2832,11 @@ def create_app(config: BlackboardConfig) -> FastAPI:
                     "workspace_root": task.get("workspace_root"),
                     "required_tools": list(task.get("required_tools") or []),
                     "required_tags": list(task.get("required_tags") or []),
+                    # M2.5.5: record which sealed-secret NAMES the brief
+                    # asked for and what egress policy was attached. Never
+                    # records the secret values.
+                    "secrets_needed": list(task.get("secrets_needed") or []),
+                    "network_egress": task.get("network_egress"),
                     "timeout_minutes": task.get("timeout_minutes"),
                     "priority": task.get("priority"),
                 },
@@ -2727,7 +2848,8 @@ def create_app(config: BlackboardConfig) -> FastAPI:
                 exc,
             )
 
-    def _audit_claim(task: dict[str, Any] | None, *, worker_id: str) -> None:
+    def _audit_claim(task: dict[str, Any] | None, *, worker_id: str,
+                     secrets_dispatched: list[str] | None = None) -> None:
         if task is None:
             return
         try:
@@ -2738,6 +2860,10 @@ def create_app(config: BlackboardConfig) -> FastAPI:
                     "task_id": int(task["id"]),
                     "worker_id": worker_id,
                     "claimed_at": task.get("claimed_at"),
+                    # M2.5.5a: record which secret NAMES were resolved
+                    # and handed to the runner. Values never enter the
+                    # audit chain.
+                    "secrets_dispatched": list(secrets_dispatched or []),
                 },
             )
         except Exception as exc:  # noqa: BLE001
@@ -2859,6 +2985,47 @@ def create_app(config: BlackboardConfig) -> FastAPI:
     def audit_tail() -> dict[str, Any]:
         return {"chain_tail": blackboard.audit_chain_tail()}
 
+    # ----- M2.5.5a: secret broker -----------------------------------------
+
+    @app.post("/secrets", dependencies=[Depends(require_auth)])
+    def put_or_rotate_secret(payload: SecretPutRequest) -> dict[str, Any]:
+        """Create-or-rotate a sealed secret by name.
+
+        The broker bumps ``version`` on every write. If the name already
+        exists this becomes a rotation (``last_rotated_at`` is set).
+        Values never appear in the response — callers see metadata only.
+        """
+        existed = any(
+            row.get("name") == payload.name
+            for row in blackboard.list_secrets()
+        )
+        try:
+            if existed:
+                meta = blackboard.rotate_secret(
+                    name=payload.name, value=payload.value
+                )
+            else:
+                meta = blackboard.put_secret(
+                    name=payload.name, value=payload.value
+                )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"secret": meta, "rotated": existed}
+
+    @app.get("/secrets", dependencies=[Depends(require_auth)])
+    def list_secrets() -> dict[str, Any]:
+        """Return secret metadata (names + versions + timestamps only)."""
+        return {"secrets": blackboard.list_secrets()}
+
+    @app.delete("/secrets/{name}", dependencies=[Depends(require_auth)])
+    def delete_secret(name: str) -> dict[str, Any]:
+        if not name:
+            raise HTTPException(status_code=400, detail="name required")
+        deleted = blackboard.delete_secret(name=name)
+        if not deleted:
+            raise HTTPException(status_code=404, detail="secret not found")
+        return {"deleted": True, "name": name}
+
     # ----- M2.4: dispatcher registry / signed dispatch ---------------------
 
     @app.post("/dispatchers/register", dependencies=[Depends(require_auth)])
@@ -2958,6 +3125,8 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             require_base_commit=payload.require_base_commit,
             dispatcher_id=payload.dispatcher_id,
             required_capabilities=payload.required_capabilities,
+            secrets_needed=payload.secrets_needed,
+            network_egress=payload.network_egress,
         )
         _audit_dispatch(
             task,
@@ -3183,7 +3352,23 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="runner not registered") from exc
-        _audit_claim(task, worker_id=payload.runner_id)
+        # M2.5.5a: resolve declared secrets and attach plaintext to the
+        # claim response so the runner can inject them into the task
+        # subprocess env. Values are returned exactly once, here. The
+        # audit chain records only the resolved NAMES.
+        secrets_dispatched: list[str] = []
+        if task is not None:
+            requested = list(task.get("secrets_needed") or [])
+            if requested:
+                resolved = blackboard.resolve_secrets(requested)
+                if resolved:
+                    task = dict(task)
+                    task["secrets"] = resolved
+                    secrets_dispatched = list(resolved.keys())
+        _audit_claim(
+            task, worker_id=payload.runner_id,
+            secrets_dispatched=secrets_dispatched,
+        )
         return JSONResponse(content={"task": task, "info": info})
 
     @app.post("/tasks/{task_id}/start", dependencies=[Depends(require_auth)])
@@ -3208,7 +3393,7 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             return blackboard.append_progress(
                 task_id=task_id,
                 worker_id=payload.worker_id,
-                message=payload.message,
+                message=blackboard.redact_text(payload.message) or "",
                 files_touched=payload.files_touched,
             )
         except KeyError as exc:
@@ -3225,7 +3410,7 @@ def create_app(config: BlackboardConfig) -> FastAPI:
                 task_id=task_id,
                 worker_id=payload.worker_id,
                 channel=payload.channel,
-                line=payload.line,
+                line=blackboard.redact_text(payload.line) or "",
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="task not found") from exc
@@ -3244,7 +3429,13 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             return blackboard.append_stream_bulk(
                 task_id=task_id,
                 worker_id=payload.worker_id,
-                entries=[e.model_dump() for e in payload.entries],
+                entries=[
+                    {
+                        "channel": e.channel,
+                        "line": blackboard.redact_text(e.line) or "",
+                    }
+                    for e in payload.entries
+                ],
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="task not found") from exc
@@ -3280,8 +3471,8 @@ def create_app(config: BlackboardConfig) -> FastAPI:
                 commits=payload.commits,
                 files_touched=payload.files_touched,
                 test_summary=payload.test_summary,
-                log_tail=payload.log_tail,
-                error=payload.error,
+                log_tail=blackboard.redact_text(payload.log_tail),
+                error=blackboard.redact_text(payload.error),
             )
         except KeyError as exc:
             raise HTTPException(status_code=404, detail="task not found") from exc
