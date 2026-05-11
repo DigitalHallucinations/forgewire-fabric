@@ -40,6 +40,7 @@ import sys
 import time
 import uuid
 import calendar
+from datetime import datetime, timezone
 from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -690,12 +691,13 @@ class Blackboard:
                 row["event_id_hash"] if row is not None else self.AUDIT_GENESIS_HASH
             )
             event_hash = self._audit_event_hash(prev_hash, kind, payload)
+            created_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
             conn.execute(
                 """
                 INSERT INTO audit_event (
                     event_id_hash, prev_event_id_hash, kind, task_id,
-                    payload_json
-                ) VALUES (?, ?, ?, ?, ?)
+                    payload_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event_hash,
@@ -703,6 +705,7 @@ class Blackboard:
                     kind,
                     int(task_id) if task_id is not None else None,
                     json.dumps(dict(payload), sort_keys=True, default=str),
+                    created_at,
                 ),
             )
             try:
