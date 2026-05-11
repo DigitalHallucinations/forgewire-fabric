@@ -491,9 +491,43 @@ def runner_identity(path: str | None) -> None:
               help="Destination file. Omit to print to stdout.")
 @click.option("--source", default=None,
               help="Source identity file (default: machine-wide).")
-def runner_identity_export(output: str | None, source: str | None) -> None:
-    from forgewire_fabric.runner.identity import export_identity
+@click.option(
+    "--bundle/--no-bundle",
+    default=True,
+    show_default=True,
+    help=(
+        "When set, write a migration bundle that also carries the "
+        "runner-config sidecar (tags / workspace_root / scope_prefixes / "
+        "tenant / max_concurrent). Disable to emit only the identity "
+        "record (backward-compatible with pre-bundle releases)."
+    ),
+)
+def runner_identity_export(
+    output: str | None, source: str | None, bundle: bool
+) -> None:
+    from forgewire_fabric.runner.identity import (
+        DEFAULT_IDENTITY_PATH,
+        export_identity,
+        export_runner_bundle,
+    )
 
+    if bundle:
+        record = export_runner_bundle(
+            destination=Path(output) if output else None,
+            identity_source=Path(source) if source else None,
+        )
+        if output:
+            _print_json(
+                {
+                    "exported_to": output,
+                    "runner_id": record["identity"]["runner_id"],
+                    "config_keys": sorted(record["config"].keys()),
+                }
+            )
+        else:
+            _print_json(record)
+        return
+    # Legacy bare-identity export (no config sidecar).
     record = export_identity(
         destination=Path(output) if output else None,
         source=Path(source) if source else None,
@@ -507,9 +541,10 @@ def runner_identity_export(output: str | None, source: str | None) -> None:
 @runner.command(
     "identity-import",
     help=(
-        "Install a previously-exported identity as this machine's runner "
-        "identity. Refuses to overwrite a different existing runner_id "
-        "unless --force."
+        "Install a previously-exported identity (or migration bundle) as "
+        "this machine's runner identity. Bundles also restore the "
+        "runner-config sidecar. Refuses to overwrite a different "
+        "existing runner_id unless --force."
     ),
 )
 @click.argument("source", type=click.Path(exists=True, dir_okay=False))
@@ -518,30 +553,155 @@ def runner_identity_export(output: str | None, source: str | None) -> None:
 @click.option("--force", is_flag=True, default=False,
               help="Overwrite an existing different runner_id.")
 def runner_identity_import(source: str, target: str | None, force: bool) -> None:
-    from forgewire_fabric.runner.identity import import_identity
+    from forgewire_fabric.runner.identity import import_runner_bundle
 
-    ident = import_identity(
+    # import_runner_bundle accepts both new-style bundles and the legacy
+    # bare-identity format produced by ``--no-bundle`` exports.
+    result = import_runner_bundle(
         Path(source),
-        target=Path(target) if target else None,
+        identity_target=Path(target) if target else None,
         force=force,
     )
     _print_json(
         {
-            "runner_id": ident.runner_id,
-            "public_key": ident.public_key_hex,
+            "runner_id": result["runner_id"],
+            "public_key": result["public_key"],
+            "config_keys": sorted(result["config"].keys()),
             "imported_from": source,
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# runner config sidecar (machine-wide routing knobs that survive service
+# reinstalls and travel with ``identity-export --bundle``)
+# ---------------------------------------------------------------------------
+
+
+@runner.group("config", help="Manage the machine-wide runner-config sidecar.")
+def runner_config_group() -> None:
+    pass
+
+
+@runner_config_group.command("show", help="Print the effective sidecar content.")
+@click.option("--path", default=None, help="Override the sidecar file path.")
+def runner_config_show(path: str | None) -> None:
+    from forgewire_fabric.runner.identity import (
+        DEFAULT_RUNNER_CONFIG_PATH,
+        load_runner_config_overrides,
+    )
+
+    target = Path(path).expanduser() if path else DEFAULT_RUNNER_CONFIG_PATH
+    _print_json(
+        {
+            "path": str(target),
+            "exists": target.exists(),
+            "values": load_runner_config_overrides(target),
+        }
+    )
+
+
+@runner_config_group.command("set", help="Persist one or more sidecar values.")
+@click.option("--workspace-root", default=None)
+@click.option("--tags", default=None, help="Comma-separated capability tags.")
+@click.option("--scope-prefixes", default=None, help="Comma-separated path prefixes.")
+@click.option("--tenant", default=None)
+@click.option("--max-concurrent", type=int, default=None)
+@click.option("--poll-interval", type=float, default=None,
+              help="Seconds between empty-claim polls.")
+@click.option("--runner-version", default=None)
+@click.option("--path", default=None, help="Override the sidecar file path.")
+@click.option("--replace/--merge", default=False, show_default=True,
+              help="Replace the file outright vs. merge with existing values.")
+def runner_config_set(
+    workspace_root: str | None,
+    tags: str | None,
+    scope_prefixes: str | None,
+    tenant: str | None,
+    max_concurrent: int | None,
+    poll_interval: float | None,
+    runner_version: str | None,
+    path: str | None,
+    replace: bool,
+) -> None:
+    from forgewire_fabric.runner.identity import (
+        DEFAULT_RUNNER_CONFIG_PATH,
+        save_runner_config_overrides,
+    )
+
+    overrides: dict[str, Any] = {}
+    if workspace_root is not None:
+        overrides["workspace_root"] = workspace_root
+    if tags is not None:
+        overrides["tags"] = tags
+    if scope_prefixes is not None:
+        overrides["scope_prefixes"] = scope_prefixes
+    if tenant is not None:
+        overrides["tenant"] = tenant
+    if max_concurrent is not None:
+        overrides["max_concurrent"] = max_concurrent
+    if poll_interval is not None:
+        overrides["poll_interval_seconds"] = poll_interval
+    if runner_version is not None:
+        overrides["runner_version"] = runner_version
+    if not overrides and not replace:
+        raise click.ClickException(
+            "no values supplied; pass --workspace-root / --tags / ... or "
+            "use --replace to clear the sidecar."
+        )
+    target = Path(path).expanduser() if path else DEFAULT_RUNNER_CONFIG_PATH
+    saved = save_runner_config_overrides(overrides, path=target, merge=not replace)
+    _print_json({"path": str(target), "values": saved})
+
+
+@runner_config_group.command("clear", help="Delete the sidecar file if present.")
+@click.option("--path", default=None, help="Override the sidecar file path.")
+def runner_config_clear(path: str | None) -> None:
+    from forgewire_fabric.runner.identity import (
+        DEFAULT_RUNNER_CONFIG_PATH,
+        clear_runner_config_overrides,
+    )
+
+    target = Path(path).expanduser() if path else DEFAULT_RUNNER_CONFIG_PATH
+    clear_runner_config_overrides(target)
+    _print_json({"path": str(target), "cleared": True})
 
 
 @runner.command("install", help="Install the runner as an OS service (NSSM/systemd/launchd).")
 @click.option("--hub-url", required=True, envvar="FORGEWIRE_HUB_URL")
 @click.option("--hub-token", required=True, envvar="FORGEWIRE_HUB_TOKEN")
 @click.option("--workspace-root", required=True, help="Per-runner workspace root.")
-def runner_install(hub_url: str, hub_token: str, workspace_root: str) -> None:
+@click.option("--tags", default=None,
+              help="Comma-separated capability tags. Seeds the runner-config sidecar.")
+@click.option("--scope-prefixes", default=None,
+              help="Comma-separated path prefixes the runner accepts. Seeds the sidecar.")
+@click.option("--tenant", default=None, help="Tenant slug. Seeds the sidecar.")
+@click.option("--max-concurrent", type=int, default=None,
+              help="Concurrency cap. Seeds the sidecar.")
+@click.option("--poll-interval", type=float, default=None,
+              help="Empty-claim poll interval (seconds). Seeds the sidecar.")
+def runner_install(
+    hub_url: str,
+    hub_token: str,
+    workspace_root: str,
+    tags: str | None,
+    scope_prefixes: str | None,
+    tenant: str | None,
+    max_concurrent: int | None,
+    poll_interval: float | None,
+) -> None:
     from forgewire_fabric.install import install_runner
 
-    install_runner(hub_url=hub_url, hub_token=hub_token, workspace_root=workspace_root)
+    install_runner(
+        hub_url=hub_url,
+        hub_token=hub_token,
+        workspace_root=workspace_root,
+        tags=tags,
+        scope_prefixes=scope_prefixes,
+        tenant=tenant,
+        max_concurrent=max_concurrent,
+        poll_interval=poll_interval,
+    )
 
 
 @runner.command("uninstall", help="Remove the runner OS service.")
@@ -1164,6 +1324,165 @@ def runners_caps(runner_filter: str | None) -> None:
 
 
 # ---------------------------------------------------------------------------
+# labels  --  fabric-wide cosmetic state (hub_name + per-runner aliases).
+#
+# Aliases live in the hub's ``labels`` table, keyed by
+# ``runner_alias:<runner_id>``. They are durable by design:
+#
+#   * **Updates** (code redeploy, hub restart) -- table is sqlite-backed.
+#   * **Upgrades** (schema bumps) -- ``CREATE TABLE IF NOT EXISTS labels``
+#     is idempotent; existing rows are preserved.
+#   * **Migrations** (hardware swap of a runner) -- aliases are keyed by
+#     ``runner_id``, not by ``hostname``, so when an operator carries the
+#     runner identity to a new host via ``runner identity-import`` the
+#     alias automatically follows.
+#
+# The ``labels export`` / ``labels import`` commands give operators an
+# out-of-band backup channel that does not depend on the hub's snapshot
+# pipeline -- useful when rebuilding a hub from scratch.
+# ---------------------------------------------------------------------------
+
+
+@cli.group("labels", help="Fabric-wide labels (hub name + runner aliases).")
+def labels_group() -> None:
+    pass
+
+
+@labels_group.command("list", help="Show the current hub_name and runner_aliases.")
+def labels_list() -> None:
+    async def _go() -> None:
+        async with _client() as c:
+            _print_json(await c.get_labels())
+
+    _async(_go())
+
+
+@labels_group.command("set-hub-name", help="Persist the fabric-wide hub display name.")
+@click.argument("name")
+@click.option("--updated-by", default=None, help="Operator handle for the audit trail.")
+def labels_set_hub_name(name: str, updated_by: str | None) -> None:
+    async def _go() -> None:
+        async with _client() as c:
+            _print_json(await c.set_hub_name(name, updated_by=updated_by))
+
+    _async(_go())
+
+
+@labels_group.command(
+    "set-runner-alias",
+    help="Persist a friendly alias for a runner_id (keyed independently of the runners table).",
+)
+@click.argument("runner_id")
+@click.argument("alias")
+@click.option("--updated-by", default=None, help="Operator handle for the audit trail.")
+def labels_set_runner_alias(
+    runner_id: str, alias: str, updated_by: str | None
+) -> None:
+    async def _go() -> None:
+        async with _client() as c:
+            _print_json(
+                await c.set_runner_alias(runner_id, alias, updated_by=updated_by)
+            )
+
+    _async(_go())
+
+
+@labels_group.command(
+    "clear-runner-alias",
+    help="Remove an alias entry. Empty-string upsert deletes the row hub-side.",
+)
+@click.argument("runner_id")
+@click.option("--updated-by", default=None)
+def labels_clear_runner_alias(runner_id: str, updated_by: str | None) -> None:
+    async def _go() -> None:
+        async with _client() as c:
+            _print_json(
+                await c.set_runner_alias(runner_id, "", updated_by=updated_by)
+            )
+
+    _async(_go())
+
+
+@labels_group.command(
+    "export",
+    help=(
+        "Write the current labels payload to a JSON file (or stdout). "
+        "Use this as an out-of-band backup that survives a full hub "
+        "rebuild even when no snapshot is available."
+    ),
+)
+@click.option("--output", default=None,
+              help="Destination file. Omit to print to stdout.")
+def labels_export(output: str | None) -> None:
+    async def _go() -> None:
+        async with _client() as c:
+            payload = await c.get_labels()
+        envelope = {
+            "schema": "forgewire-labels-export/1",
+            "labels": payload,
+        }
+        if output:
+            Path(output).expanduser().write_text(
+                json.dumps(envelope, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            _print_json(
+                {
+                    "exported_to": output,
+                    "hub_name": payload.get("hub_name", ""),
+                    "alias_count": len(payload.get("runner_aliases") or {}),
+                }
+            )
+        else:
+            _print_json(envelope)
+
+    _async(_go())
+
+
+@labels_group.command(
+    "import",
+    help=(
+        "Restore a previously-exported labels payload to the hub. Each "
+        "row is upserted via PUT /labels/{hub,runners/{id}} so the call "
+        "is idempotent. Empty values delete the corresponding row."
+    ),
+)
+@click.argument("source", type=click.Path(exists=True, dir_okay=False))
+@click.option("--updated-by", default=None, help="Operator handle for the audit trail.")
+def labels_import(source: str, updated_by: str | None) -> None:
+    data = json.loads(Path(source).expanduser().read_text(encoding="utf-8"))
+    if isinstance(data, dict) and "labels" in data:
+        schema = str(data.get("schema") or "")
+        if schema and not schema.startswith("forgewire-labels-export/"):
+            raise click.ClickException(f"unknown labels schema {schema!r}")
+        payload = data["labels"]
+    else:
+        # Tolerate a bare {hub_name, runner_aliases} blob.
+        payload = data
+    if not isinstance(payload, dict):
+        raise click.ClickException("labels payload must be a JSON object")
+    hub_name = str(payload.get("hub_name", ""))
+    aliases = payload.get("runner_aliases") or {}
+    if not isinstance(aliases, dict):
+        raise click.ClickException("runner_aliases must be an object")
+
+    async def _go() -> None:
+        applied = {"hub_name": False, "aliases": 0}
+        async with _client() as c:
+            await c.set_hub_name(hub_name, updated_by=updated_by)
+            applied["hub_name"] = True
+            for runner_id, alias in aliases.items():
+                await c.set_runner_alias(
+                    str(runner_id), str(alias), updated_by=updated_by
+                )
+                applied["aliases"] += 1
+            final = await c.get_labels()
+        _print_json({"applied": applied, "labels": final})
+
+    _async(_go())
+
+
+# ---------------------------------------------------------------------------
 # keys / token
 # ---------------------------------------------------------------------------
 
@@ -1171,8 +1490,6 @@ def runners_caps(runner_filter: str | None) -> None:
 @cli.group(help="Identity / key utilities.")
 def keys() -> None:
     pass
-
-
 @keys.command("init", help="Generate (or load) the local runner identity file.")
 @click.option("--path", default=None)
 def keys_init(path: str | None) -> None:

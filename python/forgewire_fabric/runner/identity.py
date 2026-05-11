@@ -43,6 +43,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
@@ -52,6 +53,21 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 
 
 _IDENTITY_FILENAME = "runner_identity.json"
+_RUNNER_CONFIG_FILENAME = "runner_config.json"
+
+# Routing/operational knobs that survive ``runner identity-export`` and are
+# read as a fallback by ``RunnerConfig.from_env`` when the corresponding
+# env var is unset. Env vars always win so an operator can override on the
+# command line without editing the sidecar.
+_RUNNER_CONFIG_FIELDS: tuple[str, ...] = (
+    "workspace_root",
+    "tenant",
+    "tags",
+    "scope_prefixes",
+    "max_concurrent",
+    "poll_interval_seconds",
+    "runner_version",
+)
 
 
 def _machine_identity_path() -> Path:
@@ -71,6 +87,7 @@ def _machine_identity_path() -> Path:
 
 
 DEFAULT_IDENTITY_PATH = _machine_identity_path()
+DEFAULT_RUNNER_CONFIG_PATH = DEFAULT_IDENTITY_PATH.parent / _RUNNER_CONFIG_FILENAME
 _LEGACY_USER_IDENTITY_PATH = Path.home() / ".forgewire" / _IDENTITY_FILENAME
 _LEGACY_PHRENFORGE_IDENTITY_PATH = (
     Path.home() / ".phrenforge" / _IDENTITY_FILENAME
@@ -308,3 +325,243 @@ def verify_signature(public_key_hex: str, payload: bytes, signature_hex: str) ->
         return True
     except Exception:
         return False
+
+
+# ---------------------------------------------------------------------------
+# Runner config sidecar (routing/operational knobs)
+# ---------------------------------------------------------------------------
+#
+# The runner's routing attributes (workspace_root, tenant, tags,
+# scope_prefixes, max_concurrent, poll_interval_seconds, runner_version)
+# historically came exclusively from environment variables, which the NSSM
+# / systemd / launchd service unit injected at start. That model has two
+# survivability holes:
+#
+#   1. **Updates**: a service reinstall that forgets one of the env vars
+#      silently downgrades a runner (e.g. drops a tag, narrows
+#      scope_prefixes), and the hub starts routing the wrong work to it.
+#   2. **Migration**: ``runner identity-export`` carries the keypair to
+#      the replacement host but not the operator's intent about *what
+#      that runner is for*. The operator has to remember every flag.
+#
+# The sidecar at ``<identity_dir>/runner_config.json`` is a machine-wide
+# JSON file that records the operator's intent next to the identity. It
+# is read as a **fallback** by ``RunnerConfig.from_env`` — environment
+# variables always win, so existing deployments are unaffected and
+# operators can still override on the command line. ``identity-export``
+# bundles it; ``identity-import`` restores it.
+
+
+_CSV_FIELDS = frozenset({"tags", "scope_prefixes"})
+_INT_FIELDS = frozenset({"max_concurrent"})
+_FLOAT_FIELDS = frozenset({"poll_interval_seconds"})
+
+
+def _validate_runner_config(data: object) -> dict[str, Any]:
+    """Validate and normalize a runner_config.json payload.
+
+    Returns only the keys we recognise; unknown keys are dropped so a
+    forward-compatible sidecar written by a newer CLI doesn't crash an
+    older runner. List fields are coerced to ``list[str]``; numeric
+    fields are coerced to their target type or raise ``ValueError``.
+    """
+    if not isinstance(data, dict):
+        raise ValueError("runner_config.json must contain a JSON object")
+    out: dict[str, Any] = {}
+    for key in _RUNNER_CONFIG_FIELDS:
+        if key not in data:
+            continue
+        value = data[key]
+        if value is None:
+            continue
+        if key in _CSV_FIELDS:
+            if isinstance(value, str):
+                items = [s.strip() for s in value.split(",") if s.strip()]
+            elif isinstance(value, list):
+                items = [str(s).strip() for s in value if str(s).strip()]
+            else:
+                raise ValueError(f"{key!r} must be a list or comma-string")
+            out[key] = items
+        elif key in _INT_FIELDS:
+            out[key] = int(value)
+        elif key in _FLOAT_FIELDS:
+            out[key] = float(value)
+        else:
+            out[key] = str(value)
+    return out
+
+
+def _runner_config_path_for_identity(identity_path: Path) -> Path:
+    """Resolve the sidecar path adjacent to a given identity file."""
+    return identity_path.expanduser().parent / _RUNNER_CONFIG_FILENAME
+
+
+def load_runner_config_overrides(path: Path | None = None) -> dict[str, Any]:
+    """Return the persisted runner-config sidecar, or an empty dict.
+
+    A missing or unreadable file degrades to ``{}`` so a fresh install
+    behaves identically to today (env-only). Validation errors are not
+    swallowed; they signal operator misconfiguration that should fail
+    loudly at runner start.
+    """
+    target = (path or DEFAULT_RUNNER_CONFIG_PATH).expanduser()
+    if not target.exists():
+        return {}
+    raw = json.loads(target.read_text(encoding="utf-8"))
+    return _validate_runner_config(raw)
+
+
+def save_runner_config_overrides(
+    overrides: dict[str, Any],
+    *,
+    path: Path | None = None,
+    merge: bool = True,
+) -> dict[str, Any]:
+    """Persist runner-config overrides atomically.
+
+    ``merge=True`` (default) reads the existing sidecar and overlays the
+    new keys, so an operator can update a single field without retyping
+    the whole config. ``merge=False`` replaces the file outright. An
+    empty ``overrides`` with ``merge=False`` deletes the sidecar.
+    """
+    target = (path or DEFAULT_RUNNER_CONFIG_PATH).expanduser()
+    current = load_runner_config_overrides(target) if merge else {}
+    current.update(_validate_runner_config(overrides))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not current and not merge:
+        if target.exists():
+            target.unlink()
+        return {}
+    tmp = target.with_suffix(target.suffix + f".tmp.{os.getpid()}")
+    tmp.write_text(json.dumps(current, indent=2, sort_keys=True), encoding="utf-8")
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        pass
+    os.replace(tmp, target)
+    return current
+
+
+def clear_runner_config_overrides(path: Path | None = None) -> None:
+    """Remove the runner-config sidecar if present."""
+    target = (path or DEFAULT_RUNNER_CONFIG_PATH).expanduser()
+    if target.exists():
+        target.unlink()
+
+
+# ---------------------------------------------------------------------------
+# Migration bundles (identity + config)
+# ---------------------------------------------------------------------------
+
+
+def export_runner_bundle(
+    destination: Path | None = None,
+    *,
+    identity_source: Path | None = None,
+    config_source: Path | None = None,
+) -> dict[str, Any]:
+    """Return (and optionally write) a full migration bundle.
+
+    A bundle is a JSON object with two keys::
+
+        {"identity": {<runner_identity.json>}, "config": {<runner_config.json>}}
+
+    ``config`` is present even when the sidecar is missing (as ``{}``) so
+    a re-import is deterministic. This is the file an operator carries
+    between hosts to preserve both the cryptographic identity *and* the
+    routing/operational intent.
+    """
+    id_src = (identity_source or DEFAULT_IDENTITY_PATH).expanduser()
+    if not id_src.exists():
+        load_or_create(id_src if identity_source is not None else None)
+    identity = _validate_identity_record(
+        json.loads(id_src.read_text(encoding="utf-8"))
+    )
+    cfg_src = (
+        config_source
+        if config_source is not None
+        else _runner_config_path_for_identity(id_src)
+    )
+    config = load_runner_config_overrides(cfg_src)
+    bundle = {
+        "schema": "forgewire-runner-bundle/1",
+        "exported_at": _now_iso(),
+        "identity": identity,
+        "config": config,
+    }
+    if destination is not None:
+        dst = destination.expanduser()
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dst.with_suffix(dst.suffix + f".tmp.{os.getpid()}")
+        tmp.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+        os.replace(tmp, dst)
+    return bundle
+
+
+def import_runner_bundle(
+    source: Path,
+    *,
+    identity_target: Path | None = None,
+    config_target: Path | None = None,
+    force: bool = False,
+) -> dict[str, Any]:
+    """Install a previously-exported bundle as this machine's identity+config.
+
+    Validates the schema marker, then delegates to ``import_identity``
+    (which enforces the runner_id refuse-overwrite guard) and writes the
+    sidecar atomically. Returns the restored bundle.
+
+    A plain identity-only JSON (no ``schema`` / ``identity`` keys) is
+    accepted for backward compatibility with files produced by the
+    earlier ``runner identity-export`` (which exported the bare
+    identity record). In that case no sidecar is written.
+    """
+    src = source.expanduser()
+    if not src.exists():
+        raise FileNotFoundError(f"bundle source not found: {src}")
+    data = json.loads(src.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("bundle must contain a JSON object")
+    if "identity" in data:
+        schema = str(data.get("schema") or "")
+        if schema and not schema.startswith("forgewire-runner-bundle/"):
+            raise ValueError(f"unknown bundle schema {schema!r}")
+        identity_payload = data["identity"]
+        config_payload = data.get("config") or {}
+    else:
+        # Legacy bare-identity export.
+        identity_payload = data
+        config_payload = {}
+    # Materialize the identity through a tmp file so we can reuse the
+    # validation + refuse-overwrite logic in import_identity().
+    id_tmp = (identity_target or DEFAULT_IDENTITY_PATH).expanduser()
+    id_tmp.parent.mkdir(parents=True, exist_ok=True)
+    staging = id_tmp.with_suffix(id_tmp.suffix + f".bundle.{os.getpid()}")
+    staging.write_text(json.dumps(identity_payload), encoding="utf-8")
+    try:
+        ident = import_identity(staging, target=identity_target, force=force)
+    finally:
+        try:
+            staging.unlink()
+        except OSError:
+            pass
+    cfg_dst = (
+        config_target
+        if config_target is not None
+        else _runner_config_path_for_identity(id_tmp)
+    )
+    if config_payload:
+        config = save_runner_config_overrides(
+            config_payload, path=cfg_dst, merge=False
+        )
+    else:
+        config = load_runner_config_overrides(cfg_dst)
+    return {
+        "runner_id": ident.runner_id,
+        "public_key": ident.public_key_hex,
+        "config": config,
+    }

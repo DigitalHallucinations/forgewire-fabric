@@ -37,7 +37,11 @@ from forgewire_fabric.hub.client import (
     BlackboardError,
     load_client_from_env,
 )
-from forgewire_fabric.runner.identity import RunnerIdentity, load_or_create
+from forgewire_fabric.runner.identity import (
+    RunnerIdentity,
+    load_or_create,
+    load_runner_config_overrides,
+)
 from forgewire_fabric.runner.runner_capabilities import (
     describe_capabilities,
     describe_host,
@@ -74,8 +78,28 @@ class RunnerConfig:
 
     @classmethod
     def from_env(cls) -> "RunnerConfig":
-        explicit = os.environ.get("FORGEWIRE_RUNNER_WORKSPACE_ROOT")
-        workspace_root = explicit or os.getcwd()
+        # The runner-config sidecar (machine-wide JSON next to the
+        # identity file) is the durable persistence layer for routing
+        # knobs across service reinstalls and hardware migration.
+        # Environment variables always win so an operator can override
+        # on the command line without editing the sidecar.
+        sidecar = load_runner_config_overrides()
+
+        def _env_or_sidecar(env_key: str, sidecar_key: str) -> str | None:
+            raw = os.environ.get(env_key)
+            if raw is not None and raw != "":
+                return raw
+            value = sidecar.get(sidecar_key)
+            if value is None:
+                return None
+            if isinstance(value, list):
+                return ",".join(str(v) for v in value)
+            return str(value)
+
+        explicit_ws = _env_or_sidecar(
+            "FORGEWIRE_RUNNER_WORKSPACE_ROOT", "workspace_root"
+        )
+        workspace_root = explicit_ws or os.getcwd()
         # The runner spawns every shell task with ``cwd=workspace_root``.
         # If the directory does not exist the subprocess call dies with
         # ``WinError 267 (directory name is invalid)`` *after* the hub has
@@ -88,7 +112,7 @@ class RunnerConfig:
         # directory. Bare paths like 'C:' or '/' are rejected because they
         # already resolve to existing roots and indicate a likely typo.
         if not os.path.isdir(workspace_root):
-            if explicit is None:
+            if explicit_ws is None:
                 raise RuntimeError(
                     f"runner cwd does not exist: {workspace_root!r}. Set "
                     "FORGEWIRE_RUNNER_WORKSPACE_ROOT before starting the runner."
@@ -107,22 +131,30 @@ class RunnerConfig:
                     "directory manually or correct the env var before starting "
                     "the runner."
                 ) from exc
+        max_concurrent_raw = _env_or_sidecar(
+            "FORGEWIRE_RUNNER_MAX_CONCURRENT", "max_concurrent"
+        )
+        poll_raw = _env_or_sidecar(
+            "FORGEWIRE_RUNNER_POLL_INTERVAL", "poll_interval_seconds"
+        )
+        version_raw = _env_or_sidecar(
+            "FORGEWIRE_RUNNER_VERSION", "runner_version"
+        )
         return cls(
             workspace_root=workspace_root,
-            tenant=os.environ.get("FORGEWIRE_RUNNER_TENANT") or None,
-            tags=_parse_csv(os.environ.get("FORGEWIRE_RUNNER_TAGS")),
+            tenant=_env_or_sidecar("FORGEWIRE_RUNNER_TENANT", "tenant") or None,
+            tags=_parse_csv(
+                _env_or_sidecar("FORGEWIRE_RUNNER_TAGS", "tags")
+            ),
             scope_prefixes=_parse_csv(
-                os.environ.get("FORGEWIRE_RUNNER_SCOPE_PREFIXES")
-            ),
-            max_concurrent=int(os.environ.get("FORGEWIRE_RUNNER_MAX_CONCURRENT", "1")),
-            runner_version=os.environ.get(
-                "FORGEWIRE_RUNNER_VERSION", DEFAULT_RUNNER_VERSION
-            ),
-            poll_interval_seconds=float(
-                os.environ.get(
-                    "FORGEWIRE_RUNNER_POLL_INTERVAL",
-                    str(DEFAULT_POLL_INTERVAL_SECONDS),
+                _env_or_sidecar(
+                    "FORGEWIRE_RUNNER_SCOPE_PREFIXES", "scope_prefixes"
                 )
+            ),
+            max_concurrent=int(max_concurrent_raw) if max_concurrent_raw else 1,
+            runner_version=version_raw or DEFAULT_RUNNER_VERSION,
+            poll_interval_seconds=(
+                float(poll_raw) if poll_raw else DEFAULT_POLL_INTERVAL_SECONDS
             ),
         )
 

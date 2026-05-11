@@ -172,6 +172,44 @@ class BlackboardClient:
         assert result is not None
         return result
 
+    # -- labels (cosmetic, fabric-wide) ----------------------------------
+    async def get_labels(self) -> dict[str, Any]:
+        """Return the hub label payload: ``{hub_name, runner_aliases}``."""
+        result = await self._request("GET", "/labels")
+        assert result is not None
+        return result
+
+    async def set_hub_name(
+        self, name: str, *, updated_by: str | None = None
+    ) -> dict[str, Any]:
+        """Persist the fabric-wide hub display name."""
+        payload: dict[str, Any] = {"name": name}
+        if updated_by:
+            payload["updated_by"] = updated_by
+        result = await self._request("PUT", "/labels/hub", json=payload)
+        assert result is not None
+        return result
+
+    async def set_runner_alias(
+        self, runner_id: str, alias: str, *, updated_by: str | None = None
+    ) -> dict[str, Any]:
+        """Persist an operator-set friendly alias for ``runner_id``.
+
+        Aliases live in the hub's ``labels`` table (keyed by
+        ``runner_alias:<runner_id>``) and are decoupled from the
+        ``runners`` table on purpose: a stale runner row may be pruned
+        without losing its alias, and a re-imported identity carrying
+        the same runner_id automatically picks the alias back up.
+        """
+        payload: dict[str, Any] = {"alias": alias}
+        if updated_by:
+            payload["updated_by"] = updated_by
+        result = await self._request(
+            "PUT", f"/labels/runners/{runner_id}", json=payload
+        )
+        assert result is not None
+        return result
+
     async def fetch_snapshot(self) -> tuple[bytes, dict[str, str]]:
         """Pull an atomic SQLite snapshot from the active hub.
 

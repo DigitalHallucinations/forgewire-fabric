@@ -205,15 +205,48 @@ def uninstall_hub() -> None:
         raise SystemExit(f"Unsupported platform: {sys.platform}")
 
 
-def install_runner(*, hub_url: str, hub_token: str, workspace_root: str) -> None:
+def install_runner(
+    *,
+    hub_url: str,
+    hub_token: str,
+    workspace_root: str,
+    tags: str | None = None,
+    scope_prefixes: str | None = None,
+    tenant: str | None = None,
+    max_concurrent: int | None = None,
+    poll_interval: float | None = None,
+) -> None:
     # Bootstrap the machine-wide identity directory before the service
     # starts so the runner — regardless of the OS account it runs under —
     # always resolves the same identity file on this host. This is what
     # prevents an upgrade or service-account change from minting a new
     # runner_id.
-    from forgewire_fabric.runner.identity import ensure_identity_dir
+    #
+    # We also seed the runner-config sidecar with the operator's install-
+    # time intent (workspace_root + tags + scope_prefixes + tenant +
+    # concurrency + poll interval). The sidecar is read as a fallback by
+    # ``RunnerConfig.from_env`` so a future service reinstall that omits
+    # one of the env vars cannot silently downgrade the runner's routing
+    # capabilities. Operators can override on the command line; env vars
+    # still win.
+    from forgewire_fabric.runner.identity import (
+        ensure_identity_dir,
+        save_runner_config_overrides,
+    )
 
     ensure_identity_dir()
+    sidecar: dict[str, object] = {"workspace_root": workspace_root}
+    if tags is not None:
+        sidecar["tags"] = tags
+    if scope_prefixes is not None:
+        sidecar["scope_prefixes"] = scope_prefixes
+    if tenant is not None:
+        sidecar["tenant"] = tenant
+    if max_concurrent is not None:
+        sidecar["max_concurrent"] = max_concurrent
+    if poll_interval is not None:
+        sidecar["poll_interval_seconds"] = poll_interval
+    save_runner_config_overrides(sidecar)
     if sys.platform.startswith("win"):
         _windows_install_runner(hub_url=hub_url, hub_token=hub_token, workspace_root=workspace_root)
     elif sys.platform.startswith("linux"):
