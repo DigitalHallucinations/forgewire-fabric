@@ -1313,12 +1313,40 @@ def runners_caps(runner_filter: str | None) -> None:
             out.append(
                 {
                     "runner_id": r.get("runner_id"),
+                    "alias": r.get("alias") or "",
                     "hostname": r.get("hostname"),
                     "state": r.get("state"),
                     "capabilities": r.get("capabilities") or {},
                 }
             )
-        _print_json({"runners": out})
+        _print_json({"hub_name": payload.get("hub_name", ""), "runners": out})
+
+    _async(_go())
+
+
+@runners_group.command(
+    "names",
+    help=(
+        "Compact view: hub_name + (alias, hostname, runner_id, state) per "
+        "runner. Use this to confirm a target machine by its operator-set "
+        "name before dispatching."
+    ),
+)
+def runners_names() -> None:
+    async def _go() -> None:
+        async with _client() as c:
+            payload = await c.list_runners()
+        rows = []
+        for r in payload.get("runners", []):
+            rows.append(
+                {
+                    "alias": r.get("alias") or "",
+                    "hostname": r.get("hostname"),
+                    "runner_id": r.get("runner_id"),
+                    "state": r.get("state"),
+                }
+            )
+        _print_json({"hub_name": payload.get("hub_name", ""), "runners": rows})
 
     _async(_go())
 

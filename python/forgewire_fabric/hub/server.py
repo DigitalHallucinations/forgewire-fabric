@@ -3266,9 +3266,21 @@ def create_app(config: BlackboardConfig) -> FastAPI:
 
     @app.get("/runners", dependencies=[Depends(require_auth)])
     def list_runners() -> dict[str, Any]:
+        # Enrich the registry payload with the fabric-wide labels so a
+        # dispatcher can identify machines by their operator-set names
+        # (``hub_name`` + per-runner ``alias``) without a second round
+        # trip. Aliases live in a separate table keyed by ``runner_id``
+        # so they survive runner row pruning and hardware migration; we
+        # merge them in here at the read boundary.
+        labels = blackboard.get_labels()
+        aliases = labels.get("runner_aliases") or {}
+        runners = blackboard.list_runners()
+        for r in runners:
+            r["alias"] = aliases.get(r.get("runner_id"), "")
         return {
             "hub_protocol_version": PROTOCOL_VERSION,
-            "runners": blackboard.list_runners(),
+            "hub_name": labels.get("hub_name", ""),
+            "runners": runners,
         }
 
     # -- labels (cosmetic, fabric-wide) ----------------------------------

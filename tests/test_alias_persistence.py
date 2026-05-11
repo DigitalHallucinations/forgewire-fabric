@@ -131,6 +131,46 @@ def _backdate_heartbeat(db_path: Path, runner_id: str, seconds_ago: int) -> None
 
 
 # ---------------------------------------------------------------------------
+# Dispatcher view: GET /runners includes hub_name + per-runner alias
+# ---------------------------------------------------------------------------
+
+
+def test_runners_endpoint_includes_hub_name_and_aliases(tmp_path: Path) -> None:
+    """The dispatcher MCP ``list_runners`` tool returns whatever the hub
+    serves at GET /runners. Enriching that payload server-side is what
+    lets a dispatcher identify machines by their operator-set names
+    (``hub_name`` + per-runner ``alias``) without a second round trip.
+    """
+    cfg = _make_cfg(tmp_path)
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        ident = identity_mod.load_or_create(tmp_path / "id.json")
+        _register(client, ident, hostname="DESKTOP-TEST")
+        client.put(
+            "/labels/hub", json={"name": "Test HUB 1"}, headers=_auth()
+        )
+        client.put(
+            f"/labels/runners/{ident.runner_id}",
+            json={"alias": "Precision 5520"},
+            headers=_auth(),
+        )
+        body = client.get("/runners", headers=_auth()).json()
+        assert body["hub_name"] == "Test HUB 1"
+        assert len(body["runners"]) == 1
+        row = body["runners"][0]
+        assert row["runner_id"] == ident.runner_id
+        assert row["alias"] == "Precision 5520"
+        # A runner without an alias still gets the key for stable schema.
+        client.put(
+            f"/labels/runners/{ident.runner_id}",
+            json={"alias": ""},
+            headers=_auth(),
+        )
+        body = client.get("/runners", headers=_auth()).json()
+        assert body["runners"][0]["alias"] == ""
+
+
+# ---------------------------------------------------------------------------
 # Hub-side persistence of labels
 # ---------------------------------------------------------------------------
 

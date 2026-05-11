@@ -29,9 +29,21 @@ from fastapi.testclient import TestClient
 from forgewire_fabric.dispatcher.identity import DispatcherIdentity, load_or_create
 from forgewire_fabric.hub.server import BlackboardConfig, create_app
 
-RQLITE_HOST = os.environ.get("RQLITE_HOST", "10.120.81.95")
+RQLITE_HOST = os.environ.get("RQLITE_HOST", "127.0.0.1")
 RQLITE_PORT = int(os.environ.get("RQLITE_PORT", "4001"))
 HUB_TOKEN = "test-hub-token-rqlite-aaaaaaaaaaa"
+
+# Production guard: this suite is destructive (it ``DROP TABLE IF
+# EXISTS`` every hub table before each test, including ``labels``
+# which stores operator-set fabric state like ``hub_name`` and
+# ``runner_alias:<runner_id>``). Pointing it at a non-loopback host
+# without opting in would silently wipe a live cluster. We refuse
+# unless ``FORGEWIRE_TEST_RQLITE_DESTRUCTIVE_OK=1`` is explicitly
+# set. Loopback (127.0.0.1 / ::1 / localhost) is exempt because the
+# only way a developer hits a loopback rqlite is by standing one up
+# locally for tests.
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+_DESTRUCTIVE_OK = os.environ.get("FORGEWIRE_TEST_RQLITE_DESTRUCTIVE_OK") == "1"
 
 # Order matters: drop child tables before parents so FK isn't violated.
 _HUB_TABLES = [
@@ -48,6 +60,12 @@ _HUB_TABLES = [
 
 
 def _cluster_reachable() -> bool:
+    if RQLITE_HOST not in _LOOPBACK_HOSTS and not _DESTRUCTIVE_OK:
+        # Refuse to run destructively against any host that isn't
+        # loopback unless the operator opted in. This keeps a stray
+        # ``pytest`` invocation on a dev box from wiping production
+        # labels / aliases / runners.
+        return False
     try:
         with socket.create_connection((RQLITE_HOST, RQLITE_PORT), timeout=1.0):
             pass
@@ -64,7 +82,10 @@ def _cluster_reachable() -> bool:
 
 pytestmark = pytest.mark.skipif(
     not _cluster_reachable(),
-    reason=f"rqlite cluster {RQLITE_HOST}:{RQLITE_PORT} not reachable",
+    reason=(
+        f"rqlite cluster {RQLITE_HOST}:{RQLITE_PORT} not reachable or "
+        "non-loopback without FORGEWIRE_TEST_RQLITE_DESTRUCTIVE_OK=1"
+    ),
 )
 
 
@@ -295,3 +316,65 @@ def test_claim_next_task_v2_cas_under_rqlite(tmp_path):
             "queue_empty",
             None,
         )
+
+
+def test_labels_round_trip_under_rqlite(tmp_path):
+    """Parity: ``labels`` (hub_name + runner_alias:<runner_id>) must
+    persist through the rqlite write path the same way it does under
+    sqlite. ``_upsert_label`` uses ``BEGIN IMMEDIATE`` + a single
+    DELETE-or-INSERT statement + commit, which is the rqlite-safe
+    pattern (no SELECT/RETURNING inside the buffered txn). This test
+    locks that contract in so the rqlite backend can't silently
+    regress.
+    """
+    app = _make_app(tmp_path)
+    with TestClient(app) as client:
+        # Empty registry on a freshly-DROP'd labels table.
+        r = client.get("/labels", headers=_auth())
+        assert r.status_code == 200
+        assert r.json() == {"hub_name": "", "runner_aliases": {}}
+
+        # Set hub_name -- single INSERT path.
+        r = client.put(
+            "/labels/hub", json={"name": "rqlite-parity-hub"}, headers=_auth()
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["hub_name"] == "rqlite-parity-hub"
+
+        # Upsert hub_name -- INSERT...ON CONFLICT DO UPDATE path.
+        r = client.put(
+            "/labels/hub", json={"name": "rqlite-parity-hub-v2"}, headers=_auth()
+        )
+        assert r.status_code == 200
+        assert r.json()["hub_name"] == "rqlite-parity-hub-v2"
+
+        # Per-runner aliases (multiple keys with the runner_alias: prefix).
+        r = client.put(
+            "/labels/runners/rid-A",
+            json={"alias": "Alpha"},
+            headers=_auth(),
+        )
+        assert r.status_code == 200
+        r = client.put(
+            "/labels/runners/rid-B",
+            json={"alias": "Bravo"},
+            headers=_auth(),
+        )
+        assert r.status_code == 200
+
+        # Read everything back; rqlite's strong-consistency read must see
+        # all three rows.
+        r = client.get("/labels", headers=_auth())
+        body = r.json()
+        assert body["hub_name"] == "rqlite-parity-hub-v2"
+        assert body["runner_aliases"] == {"rid-A": "Alpha", "rid-B": "Bravo"}
+
+        # Clear one alias -- DELETE path. The other rows must remain.
+        r = client.put(
+            "/labels/runners/rid-A", json={"alias": ""}, headers=_auth()
+        )
+        assert r.status_code == 200
+        r = client.get("/labels", headers=_auth())
+        body = r.json()
+        assert body["runner_aliases"] == {"rid-B": "Bravo"}
+        assert body["hub_name"] == "rqlite-parity-hub-v2"

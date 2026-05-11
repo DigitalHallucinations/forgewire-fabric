@@ -268,10 +268,12 @@ def _register_tools(registry: ToolRegistry, client: BlackboardClient) -> None:
     registry.register(
         name="list_runners",
         description=(
-            "Return the current runner registry: hub protocol_version + all "
-            "registered runners with capabilities, derived state "
-            "(online|degraded|offline|draining), and current load. Use this "
-            "to confirm a target runner is online before dispatching, and "
+            "Return the current runner registry: hub protocol_version, "
+            "operator-set ``hub_name``, and every registered runner with "
+            "its ``alias`` (operator-set friendly name), hostname, "
+            "capabilities, derived state (online|degraded|offline|"
+            "draining), and current load. Use this to confirm a target "
+            "machine by its alias or hostname before dispatching, and "
             "as the response when claim returns no_eligible_runner."
         ),
         input_schema={"type": "object", "properties": {}},
