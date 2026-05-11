@@ -1420,9 +1420,26 @@ class Blackboard:
         runners.public_key = excluded.public_key`` -- a mismatch leaves the
         row untouched (rows_affected == 0) and we then raise
         ``PermissionError``.
+
+        Also prunes any ghost ``runners`` rows from the same hostname whose
+        ``last_heartbeat`` is older than ``HEARTBEAT_OFFLINE_SECONDS``: this
+        guarantees a host that rotated its identity file (e.g. ran as a
+        different OS user) cannot leave behind a phantom registry entry.
         """
         now = _now_iso()
         with self._connect() as conn:
+            hostname = record.get("hostname")
+            if hostname:
+                cutoff = _iso_offset(-HEARTBEAT_OFFLINE_SECONDS)
+                conn.execute(
+                    """
+                    DELETE FROM runners
+                    WHERE hostname = ?
+                      AND runner_id != ?
+                      AND last_heartbeat < ?
+                    """,
+                    (hostname, record["runner_id"], cutoff),
+                )
             cur = conn.execute(
                 """
                 INSERT INTO runners (
@@ -2060,6 +2077,19 @@ def _scopes_within(task_globs: list[str], runner_prefixes: list[str]) -> bool:
 
 def _now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _iso_offset(delta_seconds: float) -> str:
+    """Return an ISO-8601 UTC timestamp ``delta_seconds`` from ``_now_iso``.
+
+    Used for time-window comparisons against the ``last_heartbeat`` column
+    (which is itself stored via ``_now_iso``). Lexicographic comparison of
+    ``YYYY-MM-DDTHH:MM:SSZ`` strings is monotonic in real time, so we don't
+    need a separate epoch column.
+    """
+    return time.strftime(
+        "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + delta_seconds)
+    )
 
 
 # ---------------------------------------------------------------------------

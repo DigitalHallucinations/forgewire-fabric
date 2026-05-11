@@ -1,9 +1,24 @@
 """Persistent runner identity (UUID + ed25519 keypair).
 
-The runner generates this once on first startup and persists it at
-``~/.phrenforge/runner_identity.json``. The hub stores the public key on
-``/runners/register`` and verifies signed payloads on every state-changing
-runner call (registration, heartbeat, drain ack).
+Identity is **machine-scoped**, not user-scoped: the same physical host must
+register under a single ``runner_id`` regardless of which OS user starts the
+runner (NSSM ``LocalSystem`` service vs. interactive ``forgewire-fabric
+runner start``). Anchoring the file under the user's home directory caused
+duplicate ``runner_id`` rows in the hub registry for the same host. The
+canonical resolution order is:
+
+1. ``$FORGEWIRE_RUNNER_IDENTITY_PATH`` if set.
+2. ``%PROGRAMDATA%\\forgewire\\runner_identity.json`` on Windows
+   (default ``C:\\ProgramData\\forgewire\\runner_identity.json``).
+3. ``/var/lib/forgewire/runner_identity.json`` on POSIX if the parent
+   exists and is writable; else ``/etc/forgewire/runner_identity.json``;
+   else fall back to ``~/.forgewire/runner_identity.json`` for dev.
+
+On first read, if the machine-wide target does not exist but a legacy
+per-user path (``~/.forgewire/runner_identity.json`` or
+``~/.phrenforge/runner_identity.json``) does, the content is migrated into
+the machine-wide path so the same ``runner_id`` is preserved across the
+upgrade.
 
 File format::
 
@@ -15,14 +30,15 @@ File format::
     }
 
 The file is written 0600 on POSIX. On Windows we fall back to default ACLs
-because chmod is a no-op there; the file lives under ``%USERPROFILE%`` which
-is per-user already.
+because chmod is a no-op there; ``%PROGRAMDATA%`` is per-machine and ACL'd
+to ``SYSTEM``/Administrators by default.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 import uuid
 from dataclasses import dataclass
@@ -35,8 +51,30 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 )
 
 
-DEFAULT_IDENTITY_PATH = Path.home() / ".forgewire" / "runner_identity.json"
-_LEGACY_IDENTITY_PATH = Path.home() / ".phrenforge" / "runner_identity.json"
+_IDENTITY_FILENAME = "runner_identity.json"
+
+
+def _machine_identity_path() -> Path:
+    """Return the canonical machine-wide identity path for this OS."""
+    override = os.environ.get("FORGEWIRE_RUNNER_IDENTITY_PATH")
+    if override:
+        return Path(override).expanduser()
+    if sys.platform == "win32":
+        program_data = os.environ.get("PROGRAMDATA") or r"C:\ProgramData"
+        return Path(program_data) / "forgewire" / _IDENTITY_FILENAME
+    # POSIX: prefer /var/lib/forgewire, fall back to /etc/forgewire.
+    for base in ("/var/lib/forgewire", "/etc/forgewire"):
+        parent = Path(base)
+        if parent.exists() and os.access(parent, os.W_OK):
+            return parent / _IDENTITY_FILENAME
+    return Path("/var/lib/forgewire") / _IDENTITY_FILENAME
+
+
+DEFAULT_IDENTITY_PATH = _machine_identity_path()
+_LEGACY_USER_IDENTITY_PATH = Path.home() / ".forgewire" / _IDENTITY_FILENAME
+_LEGACY_PHRENFORGE_IDENTITY_PATH = (
+    Path.home() / ".phrenforge" / _IDENTITY_FILENAME
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,14 +97,33 @@ def _now_iso() -> str:
 
 
 def load_or_create(path: Path | None = None) -> RunnerIdentity:
-    """Return the persisted identity, creating it on first use."""
+    """Return the persisted identity, creating it on first use.
+
+    When ``path`` is ``None`` we resolve to the machine-wide default
+    (``DEFAULT_IDENTITY_PATH``). On first read, content from any legacy
+    per-user identity file is migrated into the machine-wide location so
+    the same ``runner_id`` is preserved across upgrades.
+    """
+    explicit = path is not None
     target = (path or DEFAULT_IDENTITY_PATH).expanduser()
-    if not target.exists() and path is None and _LEGACY_IDENTITY_PATH.exists():
-        # Migrate from legacy ~/.phrenforge/runner_identity.json on first read.
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(
-            _LEGACY_IDENTITY_PATH.read_text(encoding="utf-8"), encoding="utf-8"
-        )
+    if not target.exists() and not explicit:
+        for legacy in (
+            _LEGACY_USER_IDENTITY_PATH,
+            _LEGACY_PHRENFORGE_IDENTITY_PATH,
+        ):
+            if legacy.exists():
+                try:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(
+                        legacy.read_text(encoding="utf-8"), encoding="utf-8"
+                    )
+                except OSError:
+                    # If we can't write to the machine-wide path (no perms),
+                    # fall back to the legacy path so we don't mint a fresh
+                    # runner_id on every restart. The deployer is expected
+                    # to fix permissions; we degrade gracefully meanwhile.
+                    target = legacy
+                break
     if target.exists():
         data = json.loads(target.read_text(encoding="utf-8"))
         return RunnerIdentity(
@@ -74,7 +131,13 @@ def load_or_create(path: Path | None = None) -> RunnerIdentity:
             public_key_hex=str(data["public_key"]),
             _private_key_hex=str(data["private_key"]),
         )
-    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        # Can't create the machine-wide dir (e.g. unprivileged dev box):
+        # fall back to a per-user path so the runner can still come up.
+        target = _LEGACY_USER_IDENTITY_PATH
+        target.parent.mkdir(parents=True, exist_ok=True)
     sk = Ed25519PrivateKey.generate()
     sk_bytes = sk.private_bytes(
         encoding=serialization.Encoding.Raw,
