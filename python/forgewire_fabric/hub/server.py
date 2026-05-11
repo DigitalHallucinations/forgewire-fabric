@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -37,6 +38,7 @@ import secrets
 import sqlite3
 import sys
 import time
+import uuid
 import calendar
 from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -154,6 +156,12 @@ class BlackboardConfig:
     rqlite_host: str = "127.0.0.1"
     rqlite_port: int = 4001
     rqlite_consistency: str = "strong"
+    # M2.5.1: optional outbound webhook fired when a dispatch is held for
+    # human approval (REQUIRE_APPROVAL). The hub POSTs a JSON body
+    # ``{event: "approval.created", approval_id, decision, task_label,
+    # branch, scope_globs}`` to this URL with a 5s timeout. Failures are
+    # logged but never block the dispatch path.
+    approval_webhook_url: str | None = None
 
 
 class Blackboard:
@@ -350,6 +358,39 @@ class Blackboard:
             """
         )
 
+        # M2.5.1: human-approval queue for REQUIRE_APPROVAL dispatch
+        # decisions. The gate computes a stable envelope_hash over the
+        # policy-relevant fields (sorted scope_globs, target branch, task
+        # label) and either reuses the matching pending row or creates a
+        # new one. Operators clear the queue with the
+        # ``forgewire-fabric approvals`` CLI; the dispatcher then re-POSTs
+        # the same brief with ``approval_id`` set, which the gate consumes.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS approvals (
+                approval_id      TEXT PRIMARY KEY,
+                envelope_hash    TEXT NOT NULL,
+                decision_json    TEXT NOT NULL,
+                task_label       TEXT NOT NULL,
+                branch           TEXT,
+                scope_globs_json TEXT NOT NULL,
+                dispatcher_id    TEXT,
+                status           TEXT NOT NULL DEFAULT 'pending',
+                approver         TEXT,
+                reason           TEXT,
+                created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+                resolved_at      TEXT,
+                consumed_at      TEXT
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_approvals_envelope ON approvals(envelope_hash, status)"
+        )
+
     # ----------------------------------------------------------------- labels
 
     def get_labels(self) -> dict[str, Any]:
@@ -397,6 +438,165 @@ class Blackboard:
                     (key, value, updated_by),
                 )
             conn.commit()
+
+    # ------------------------------------------------------------ approvals
+
+    @staticmethod
+    def envelope_hash(
+        *,
+        scope_globs: list[str],
+        branch: str | None,
+        task_label: str,
+    ) -> str:
+        """Stable hash over the policy-relevant slice of a dispatch.
+
+        Operators approve an *intent* — "let this brief touch this scope on
+        this branch", not "let this exact prompt run". We therefore hash the
+        sorted scope_globs, the target branch, and the human task label
+        (todo_id when set, else title). A re-dispatch of the same intent
+        reuses the existing pending approval row instead of spawning a new
+        one, which keeps the queue bounded under retry storms.
+        """
+        canonical = json.dumps(
+            {
+                "scope_globs": sorted(str(s) for s in scope_globs),
+                "branch": branch or "",
+                "task_label": str(task_label),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(canonical).hexdigest()
+
+    def create_or_get_pending_approval(
+        self,
+        *,
+        envelope_hash: str,
+        decision: dict[str, Any],
+        task_label: str,
+        branch: str | None,
+        scope_globs: list[str],
+        dispatcher_id: str | None,
+    ) -> tuple[str, bool]:
+        """Insert or reuse a pending approval row. Returns ``(approval_id, created)``.
+
+        ``created`` is True when a new row was inserted; False when an existing
+        pending row matched on ``envelope_hash``. The hub fires the approval
+        webhook only on creation.
+        """
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT approval_id FROM approvals "
+                "WHERE envelope_hash = ? AND status = 'pending' LIMIT 1",
+                (envelope_hash,),
+            ).fetchone()
+            if row is not None:
+                return row["approval_id"], False
+            approval_id = uuid.uuid4().hex
+            conn.execute(
+                """
+                INSERT INTO approvals (
+                    approval_id, envelope_hash, decision_json, task_label,
+                    branch, scope_globs_json, dispatcher_id, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
+                """,
+                (
+                    approval_id,
+                    envelope_hash,
+                    json.dumps(decision, sort_keys=True),
+                    task_label,
+                    branch,
+                    json.dumps(list(scope_globs)),
+                    dispatcher_id,
+                ),
+            )
+            conn.commit()
+            return approval_id, True
+
+    def get_approval(self, approval_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM approvals WHERE approval_id = ?",
+                (approval_id,),
+            ).fetchone()
+        return dict(row) if row is not None else None
+
+    def list_approvals(
+        self,
+        *,
+        status: str | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM approvals"
+        params: tuple[Any, ...] = ()
+        if status is not None:
+            sql += " WHERE status = ?"
+            params = (status,)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params = params + (int(limit),)
+        with self._connect() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def resolve_approval(
+        self,
+        *,
+        approval_id: str,
+        status: str,
+        approver: str | None,
+        reason: str | None,
+    ) -> dict[str, Any]:
+        if status not in ("approved", "denied"):
+            raise ValueError("status must be 'approved' or 'denied'")
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE approvals
+                   SET status = ?, approver = ?, reason = ?,
+                       resolved_at = datetime('now')
+                 WHERE approval_id = ? AND status = 'pending'
+                """,
+                (status, approver, reason, approval_id),
+            )
+            if cur.rowcount == 0:
+                # Either unknown or already resolved.
+                row = conn.execute(
+                    "SELECT * FROM approvals WHERE approval_id = ?",
+                    (approval_id,),
+                ).fetchone()
+                if row is None:
+                    raise KeyError(approval_id)
+                raise PermissionError(
+                    f"approval already resolved: status={row['status']}"
+                )
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM approvals WHERE approval_id = ?",
+                (approval_id,),
+            ).fetchone()
+        return dict(row)
+
+    def consume_approval(self, approval_id: str, envelope_hash: str) -> bool:
+        """Atomically consume an approved row matching ``envelope_hash``.
+
+        Returns True if the row was consumed (CAS succeeded), False otherwise
+        (unknown id, wrong envelope, denied, already consumed). Callers treat
+        False as "approval is not valid for this dispatch" and re-raise the
+        original 428.
+        """
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE approvals
+                   SET status = 'consumed', consumed_at = datetime('now')
+                 WHERE approval_id = ?
+                   AND envelope_hash = ?
+                   AND status = 'approved'
+                """,
+                (approval_id, envelope_hash),
+            )
+            conn.commit()
+            return cur.rowcount > 0
 
     # ----------------------------------------------------------------- tasks
 
@@ -1546,6 +1746,19 @@ class DispatchTaskRequest(BaseModel):
     tenant: str | None = None
     workspace_root: str | None = None
     require_base_commit: bool = False
+    # M2.5.1: when a previous attempt at the same envelope returned 428
+    # REQUIRE_APPROVAL, the dispatcher re-POSTs with the approval_id from
+    # the issued queue row. The hub validates + consumes it on a match
+    # against the canonical envelope hash and bypasses the gate. Excluded
+    # from the v2 canonical signed payload (out-of-band, bearer-gated).
+    approval_id: str | None = None
+
+
+class ApprovalDecisionRequest(BaseModel):
+    """Body for ``POST /approvals/{id}/approve`` and ``/deny``."""
+
+    approver: str | None = Field(default=None, max_length=200)
+    reason: str | None = Field(default=None, max_length=2000)
 
 
 class ClaimRequest(BaseModel):
@@ -1980,6 +2193,7 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             task_id=(payload.todo_id or payload.title),
             scope_globs=payload.scope_globs,
             branch=payload.branch,
+            approval_id=payload.approval_id,
         )
         task = blackboard.create_task(
             title=payload.title,
@@ -2039,12 +2253,25 @@ def create_app(config: BlackboardConfig) -> FastAPI:
 
     # ----- M2.5.1 + M2.5.2: dispatch / completion policy enforcement -----
 
+    def _fire_approval_webhook(payload: dict[str, Any]) -> None:
+        url = config.approval_webhook_url
+        if not url:
+            return
+        try:
+            with httpx.Client(timeout=5.0) as client:
+                client.post(url, json=payload)
+        except Exception as exc:  # noqa: BLE001 - best-effort notify
+            logging.getLogger(__name__).warning(
+                "approval webhook to %s failed: %s", url, exc
+            )
+
     def _enforce_dispatch_gate(
         *,
         task_id: str,
         scope_globs: list[str],
         branch: str | None,
         dispatcher_id: str | None = None,
+        approval_id: str | None = None,
     ) -> None:
         from forgewire_fabric.policy import DispatchRequest
 
@@ -2058,9 +2285,46 @@ def create_app(config: BlackboardConfig) -> FastAPI:
         )
         if decision.allowed:
             return
-        # 403 for hard deny, 428 (Precondition Required) for approval gate.
-        status_code = 403 if decision.denied else 428
-        raise HTTPException(status_code=status_code, detail=decision.to_dict())
+        if decision.denied:
+            # Hard deny is non-bypassable — even with an approval token.
+            raise HTTPException(status_code=403, detail=decision.to_dict())
+        # REQUIRE_APPROVAL path. Compute envelope hash so we can either
+        # consume a matching prior approval or seed a new pending row.
+        env_hash = blackboard.envelope_hash(
+            scope_globs=list(scope_globs),
+            branch=branch,
+            task_label=str(task_id),
+        )
+        if approval_id and blackboard.consume_approval(approval_id, env_hash):
+            return
+        approval_id_new, created = blackboard.create_or_get_pending_approval(
+            envelope_hash=env_hash,
+            decision=decision.to_dict(),
+            task_label=str(task_id),
+            branch=branch,
+            scope_globs=list(scope_globs),
+            dispatcher_id=dispatcher_id,
+        )
+        detail = decision.to_dict()
+        detail["approval_id"] = approval_id_new
+        detail["envelope_hash"] = env_hash
+        detail["hint"] = (
+            "re-POST the same brief with approval_id=<id> after an operator "
+            "runs `forgewire-fabric approvals approve "
+            f"{approval_id_new}`"
+        )
+        if created:
+            _fire_approval_webhook(
+                {
+                    "event": "approval.created",
+                    "approval_id": approval_id_new,
+                    "task_label": str(task_id),
+                    "branch": branch,
+                    "scope_globs": list(scope_globs),
+                    "decision": decision.to_dict(),
+                }
+            )
+        raise HTTPException(status_code=428, detail=detail)
 
     def _enforce_completion_gate(
         *,
@@ -2082,6 +2346,67 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             # DENY is the only path that refuses to record the result.
             return
         raise HTTPException(status_code=403, detail=decision.to_dict())
+
+    # ----- M2.5.1: approval queue HTTP surface -----------------------------
+
+    @app.get("/approvals", dependencies=[Depends(require_auth)])
+    def list_approvals(status: str | None = None, limit: int = 200) -> dict[str, Any]:
+        if status is not None and status not in (
+            "pending",
+            "approved",
+            "denied",
+            "consumed",
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="status must be one of pending|approved|denied|consumed",
+            )
+        return {
+            "approvals": blackboard.list_approvals(status=status, limit=limit),
+        }
+
+    @app.get("/approvals/{approval_id}", dependencies=[Depends(require_auth)])
+    def get_approval(approval_id: str) -> dict[str, Any]:
+        row = blackboard.get_approval(approval_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="approval not found")
+        return row
+
+    @app.post(
+        "/approvals/{approval_id}/approve", dependencies=[Depends(require_auth)]
+    )
+    def approve_approval(
+        approval_id: str, payload: ApprovalDecisionRequest
+    ) -> dict[str, Any]:
+        try:
+            return blackboard.resolve_approval(
+                approval_id=approval_id,
+                status="approved",
+                approver=payload.approver,
+                reason=payload.reason,
+            )
+        except KeyError:
+            raise HTTPException(status_code=404, detail="approval not found")
+        except PermissionError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post(
+        "/approvals/{approval_id}/deny", dependencies=[Depends(require_auth)]
+    )
+    def deny_approval(
+        approval_id: str, payload: ApprovalDecisionRequest
+    ) -> dict[str, Any]:
+        try:
+            return blackboard.resolve_approval(
+                approval_id=approval_id,
+                status="denied",
+                approver=payload.approver,
+                reason=payload.reason,
+            )
+        except KeyError:
+            raise HTTPException(status_code=404, detail="approval not found")
+        except PermissionError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     # ----- M2.4: dispatcher registry / signed dispatch ---------------------
 
@@ -2163,6 +2488,7 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             scope_globs=payload.scope_globs,
             branch=payload.branch,
             dispatcher_id=payload.dispatcher_id,
+            approval_id=payload.approval_id,
         )
         return blackboard.create_task(
             title=payload.title,
@@ -2725,6 +3051,15 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "still emits structured PolicyDecision records on dispatch/completion."
         ),
     )
+    parser.add_argument(
+        "--approval-webhook",
+        default=os.environ.get("FORGEWIRE_HUB_APPROVAL_WEBHOOK"),
+        help=(
+            "Optional URL the hub POSTs to when a new approval row is created. "
+            "Receives JSON {event:'approval.created', approval_id, task_label, "
+            "branch, scope_globs, decision}. Failures are logged, never blocking."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -2745,6 +3080,7 @@ def main(argv: list[str] | None = None) -> None:
         rqlite_port=args.rqlite_port,
         rqlite_consistency=args.rqlite_consistency,
         policy_path=Path(args.policy_file).expanduser() if args.policy_file else None,
+        approval_webhook_url=args.approval_webhook,
     )
     logging.basicConfig(
         level=args.log_level.upper(),

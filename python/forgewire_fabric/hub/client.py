@@ -236,6 +236,45 @@ class BlackboardClient:
         assert result is not None
         return result
 
+    # ---- M2.5.1: approval queue -------------------------------------------
+
+    async def list_approvals(
+        self, *, status: str | None = None, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"limit": limit}
+        if status is not None:
+            params["status"] = status
+        result = await self._request("GET", "/approvals", params=params)
+        assert result is not None
+        return result["approvals"]
+
+    async def get_approval(self, approval_id: str) -> dict[str, Any]:
+        result = await self._request("GET", f"/approvals/{approval_id}")
+        assert result is not None
+        return result
+
+    async def approve_approval(
+        self, approval_id: str, *, approver: str | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        result = await self._request(
+            "POST", f"/approvals/{approval_id}/approve",
+            json={"approver": approver, "reason": reason},
+        )
+        assert result is not None
+        return result
+
+    async def deny_approval(
+        self, approval_id: str, *, approver: str | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        result = await self._request(
+            "POST", f"/approvals/{approval_id}/deny",
+            json={"approver": approver, "reason": reason},
+        )
+        assert result is not None
+        return result
+
     async def append_stream(
         self, task_id: int, payload: dict[str, Any]
     ) -> dict[str, Any]:

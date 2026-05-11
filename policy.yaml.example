@@ -1,0 +1,67 @@
+# ForgeWire Fabric hub-side enforcement policy.
+# Loaded by HubDispatchGate (M2.5.1 + M2.5.2). Decisions are returned in the
+# HTTP response body of POST /tasks, /tasks/v2, and /tasks/{id}/result.
+# DENY  -> 403, REQUIRE_APPROVAL -> 428, ALLOW -> normal flow.
+
+# Hard refusals: any dispatch whose scope_globs overlap one of these patterns
+# is denied. Completion gate also refuses results that touched a forbidden
+# path. Glob semantics (** = recursive).
+forbidden_paths:
+  - "secrets/**"
+  - ".env"
+  - ".env.*"
+  - "**/credentials.json"
+  - "**/id_rsa*"
+  - "**/id_ed25519*"
+  - "**/.ssh/**"
+  - "**/.aws/**"
+  - "**/*.pem"
+  - "**/*.key"
+
+# Branches that require explicit human approval. Dispatching with target_branch
+# in this list returns 428 Precondition Required so the dispatcher knows to
+# loop in a reviewer instead of silently executing on a protected branch.
+protected_branches:
+  - "main"
+  - "master"
+  - "release/*"
+
+# Diff-size cap on completion. Results reporting more changed lines than this
+# are denied. Set conservatively; raise via PR if a legitimate refactor needs it.
+max_diff_lines: 5000
+
+# Shell-intent gating: command tools must be invoked with a workspace_root.
+# Prevents a runner from running shell ops outside its task sandbox.
+workspace_required_for_shell: true
+
+# Shell-intent gating: command tools must be invoked with a workspace_root.
+# Prevents a runner from running shell ops outside its task sandbox.
+workspace_required_for_shell: true
+
+# ----- M2.5.5 stubs (not enforced yet; FabricPolicy parses them today) ------
+
+# Egress allowlist (per dispatch). When set, runner-side egress is restricted
+# to this set of hosts. Phase 2.5 ships userspace SOCKS proxy interception;
+# Phase 4 (M4.2) ships the kernel-level backstop (eBPF / WFP / NetExt).
+# egress_allowlist:
+#   - "pypi.org"
+#   - "github.com"
+#   - "api.openai.com"
+
+# ----- Approval workflow (M2.5.1) -------------------------------------------
+
+# When require_approval triggers (e.g. protected_branches), the hub creates an
+# approval record and returns 428. Operators clear the queue with:
+#   forgewire-fabric approvals list
+#   forgewire-fabric approvals approve <approval_id>
+#   forgewire-fabric approvals deny    <approval_id> --reason ...
+#   forgewire-fabric approvals watch
+# 'approvers' lists the operator IDs (matched against bearer-token-derived
+# identity in a future milestone; today this is informational).
+# 'reviewers_required' is the minimum count of distinct approve votes.
+approvers: []
+reviewers_required: 0
+
+# Intent kinds that always require approval regardless of scope. Currently
+# parsed but not enforced — wired by M2.5.4's intent stream.
+# require_approval: ["shell", "network"]
