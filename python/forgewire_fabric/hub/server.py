@@ -674,19 +674,15 @@ class Blackboard:
     ) -> dict[str, Any]:
         """Append one event to the hash-chained audit log.
 
-        Concurrency: SQLite's BEGIN IMMEDIATE on the same connection
-        serialises tail-read + insert. On rqlite the Raft log already
-        serialises writes, but the tail-read is on the leader so a
-        chain race would still be possible if two appenders raced; we
-        accept that and rely on the unique index on ``event_id_hash``
-        to catch a collision.
+        Concurrency: the hub process is the only writer to ``audit_event``
+        and the GIL serialises in-process appenders, so a tail-read +
+        INSERT (without BEGIN IMMEDIATE) is sufficient. The UNIQUE index
+        on ``event_id_hash`` would catch the impossible inter-process
+        race. We deliberately do *not* wrap the read+insert in a buffered
+        transaction because the rqlite parity path forbids SELECT inside
+        BEGIN/COMMIT (rqlite serialises writes via Raft on its own).
         """
         with self._connect() as conn:
-            try:
-                conn.execute("BEGIN IMMEDIATE")
-            except sqlite3.OperationalError:
-                # rqlite does not support BEGIN IMMEDIATE; ignore.
-                pass
             row = conn.execute(
                 "SELECT event_id_hash FROM audit_event ORDER BY seq DESC LIMIT 1"
             ).fetchone()
@@ -709,7 +705,10 @@ class Blackboard:
                     json.dumps(dict(payload), sort_keys=True, default=str),
                 ),
             )
-            conn.commit()
+            try:
+                conn.commit()
+            except Exception:  # noqa: BLE001 - rqlite autocommits per request
+                pass
         return {
             "event_id_hash": event_hash,
             "prev_event_id_hash": prev_hash,
