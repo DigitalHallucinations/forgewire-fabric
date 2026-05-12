@@ -2613,6 +2613,56 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             "port": config.port,
         }
 
+    @app.get("/cluster/health", dependencies=[Depends(require_auth)])
+    def cluster_health() -> dict[str, Any]:
+        """Cluster + sidecar status for the Hosts/Fabric sidebar.
+
+        Backend-aware. Reports:
+
+        * ``backend``: ``"sqlite"`` or ``"rqlite"``.
+        * ``rqlite``: host/port/consistency when backend=rqlite, else None.
+        * ``labels_snapshot``: status dict from startup restore
+          (status, applied count, path) plus live file metadata
+          (exists, size_bytes, mtime) so the UI can flag a stale
+          sidecar without rereading the file.
+        """
+        report = getattr(app.state, "labels_snapshot_report", None) or {
+            "status": "unknown",
+            "applied": 0,
+            "path": None,
+        }
+        sidecar: dict[str, Any] = {
+            "status": report.get("status"),
+            "applied": report.get("applied", 0),
+            "path": report.get("path"),
+            "exists": False,
+            "size_bytes": None,
+            "mtime": None,
+        }
+        sp = report.get("path")
+        if sp:
+            try:
+                p = Path(sp)
+                if p.exists():
+                    st = p.stat()
+                    sidecar["exists"] = True
+                    sidecar["size_bytes"] = st.st_size
+                    sidecar["mtime"] = st.st_mtime
+            except OSError:
+                pass
+        rqlite: dict[str, Any] | None = None
+        if config.backend == "rqlite":
+            rqlite = {
+                "host": config.rqlite_host,
+                "port": config.rqlite_port,
+                "consistency": config.rqlite_consistency,
+            }
+        return {
+            "backend": config.backend,
+            "rqlite": rqlite,
+            "labels_snapshot": sidecar,
+        }
+
     @app.get("/state/snapshot", dependencies=[Depends(require_auth)])
     def state_snapshot(request: Request) -> JSONResponse:
         """PARITY-ONLY: atomic state snapshot for failover replication.

@@ -974,3 +974,50 @@ def test_labels_cli_import_accepts_bare_payload(
         assert body["runner_aliases"] == {
             "55555555-5555-5555-5555-555555555555": "bare-alias"
         }
+
+
+# ---------------------------------------------------------------------------
+# /cluster/health endpoint (Hosts sidebar)
+# ---------------------------------------------------------------------------
+
+
+def test_cluster_health_sqlite_reports_backend_and_sidecar(tmp_path: Path) -> None:
+    """The ``/cluster/health`` endpoint must report the active backend
+    and labels-snapshot sidecar status so the vsix Hosts view can flag
+    a stale or missing sidecar without rereading the file itself."""
+    snapshot_path = tmp_path / "labels.snapshot.json"
+    cfg = BlackboardConfig(
+        db_path=tmp_path / "hub.sqlite3",
+        token=HUB_TOKEN,
+        host="127.0.0.1",
+        port=0,
+        labels_snapshot_path=snapshot_path,
+    )
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        # Trigger a write so the sidecar exists.
+        client.put("/labels/hub", json={"name": "ClusterHealth Test"}, headers=_auth())
+        body = client.get("/cluster/health", headers=_auth()).json()
+        assert body["backend"] == "sqlite"
+        assert body["rqlite"] is None
+        sidecar = body["labels_snapshot"]
+        assert sidecar["status"] in ("absent", "seeded_from_db", "applied", "disabled")
+        assert sidecar["path"] == str(snapshot_path)
+        # File now exists thanks to the write-through.
+        assert sidecar["exists"] is True
+        assert isinstance(sidecar["size_bytes"], int) and sidecar["size_bytes"] > 0
+        assert isinstance(sidecar["mtime"], float)
+
+
+def test_cluster_health_unauthorized(tmp_path: Path) -> None:
+    cfg = BlackboardConfig(
+        db_path=tmp_path / "hub.sqlite3",
+        token=HUB_TOKEN,
+        host="127.0.0.1",
+        port=0,
+    )
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        r = client.get("/cluster/health")
+        assert r.status_code == 401
+
