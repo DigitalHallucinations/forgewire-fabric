@@ -248,11 +248,29 @@ function hubIconColor(key: string, description: string | undefined, icon: string
 }
 
 // ---------------------------------------------------------------------------
-// Runners (hierarchical: runner -> properties)
+// Runners (hierarchical: kind group -> runner -> properties)
+//
+// Mirrors the Tasks pane taxonomy: every fabric host is expected to expose
+// BOTH a command runner (always-on NSSM service, kind:command) and an
+// agent runner (interactive Copilot-Chat MCP, kind:agent). The two groups
+// are always shown so the architectural split is visible even when the
+// agent bucket is empty (e.g. on a headless host with no logged-in VS Code).
+// A runner is bucketed by its self-declared `kind:*` tag; runners that
+// predate the taxonomy (no kind tag) default to 'command'.
 // ---------------------------------------------------------------------------
 
+function bucketRunner(r: RunnerInfo): "agent" | "command" {
+  const tags = r.tags ?? [];
+  if (tags.includes("kind:agent")) return "agent";
+  // Default bucket: missing/unknown kind is treated as 'command' because
+  // every pre-taxonomy NSSM runner is a shell-exec command runner.
+  return "command";
+}
+
 export type RunnerNode =
-  | { kind: "runner"; runner: RunnerInfo }
+  | { kind: "group"; group: "agent" | "command"; count: number }
+  | { kind: "runner"; runner: RunnerInfo; parent: "agent" | "command" }
+  | { kind: "placeholder"; group: "agent" | "command"; label: string; icon: string; description?: string }
   | { kind: "prop"; runner: RunnerInfo; key: string; label: string; description: string; icon: string };
 
 export class RunnersProvider implements vscode.TreeDataProvider<RunnerNode> {
@@ -260,6 +278,7 @@ export class RunnersProvider implements vscode.TreeDataProvider<RunnerNode> {
   readonly onDidChangeTreeData = this._onDidChange.event;
 
   private aliases: Record<string, string> = {};
+  private buckets: { agent: RunnerInfo[]; command: RunnerInfo[] } = { agent: [], command: [] };
 
   constructor(private readonly client: () => HubClient | undefined) {}
 
@@ -271,12 +290,43 @@ export class RunnersProvider implements vscode.TreeDataProvider<RunnerNode> {
     if (element?.kind === "runner") {
       return runnerProps(element.runner, this.aliases);
     }
-    if (element?.kind === "prop") {
+    if (element?.kind === "prop" || element?.kind === "placeholder") {
       return [];
     }
+    if (element?.kind === "group") {
+      const bucket = this.buckets[element.group];
+      if (bucket.length === 0) {
+        const label = element.group === "agent"
+          ? "No agent runners online"
+          : "No command runners online";
+        const description = element.group === "agent"
+          ? "open the 'forgewire-runner' chat mode in VS Code"
+          : "start the 'ForgeWireRunner' Windows service";
+        return [
+          {
+            kind: "placeholder",
+            group: element.group,
+            label,
+            icon: element.group === "agent" ? "hubot" : "terminal",
+            description,
+          },
+        ];
+      }
+      return bucket.map((r) => ({
+        kind: "runner" as const,
+        runner: r,
+        parent: element.group,
+      }));
+    }
+
+    // Top level: load runners + aliases, populate the two buckets.
     const c = this.client();
     if (!c) {
-      return [];
+      this.buckets = { agent: [], command: [] };
+      return [
+        { kind: "group", group: "agent", count: 0 },
+        { kind: "group", group: "command", count: 0 },
+      ];
     }
     try {
       const [runners, labels] = await Promise.all([
@@ -284,13 +334,54 @@ export class RunnersProvider implements vscode.TreeDataProvider<RunnerNode> {
         c.getLabels().catch(() => ({ hub_name: "", runner_aliases: {} })),
       ]);
       this.aliases = labels.runner_aliases ?? {};
-      return runners.map((r) => ({ kind: "runner" as const, runner: r }));
+      this.buckets = { agent: [], command: [] };
+      for (const r of runners) {
+        this.buckets[bucketRunner(r)].push(r);
+      }
     } catch {
-      return [];
+      this.buckets = { agent: [], command: [] };
     }
+    return [
+      { kind: "group", group: "agent", count: this.buckets.agent.length },
+      { kind: "group", group: "command", count: this.buckets.command.length },
+    ];
   }
 
   getTreeItem(n: RunnerNode): vscode.TreeItem {
+    if (n.kind === "group") {
+      const label = n.group === "agent" ? "Agent runners" : "Command runners";
+      const item = new vscode.TreeItem(
+        label,
+        vscode.TreeItemCollapsibleState.Expanded
+      );
+      item.id = `runners.group.${n.group}`;
+      item.description = `${n.count}`;
+      item.contextValue = `runners.group.${n.group}`;
+      if (n.group === "agent") {
+        item.iconPath = new vscode.ThemeIcon("hubot", new vscode.ThemeColor("charts.blue"));
+        item.tooltip = new vscode.MarkdownString(
+          "**Agent runners** — interactive Copilot-Chat MCP sessions. " +
+          "Claim `kind:agent` tasks. Not a daemon; opened on demand in VS Code."
+        );
+      } else {
+        item.iconPath = new vscode.ThemeIcon("terminal", new vscode.ThemeColor("charts.purple"));
+        item.tooltip = new vscode.MarkdownString(
+          "**Command runners** — always-on shell-exec services (NSSM `ForgeWireRunner`). " +
+          "Claim `kind:command` tasks."
+        );
+      }
+      return item;
+    }
+
+    if (n.kind === "placeholder") {
+      const item = new vscode.TreeItem(n.label, vscode.TreeItemCollapsibleState.None);
+      item.id = `runners.${n.group}.placeholder`;
+      item.iconPath = new vscode.ThemeIcon(n.icon);
+      if (n.description) item.description = n.description;
+      item.contextValue = `runners.placeholder.${n.group}`;
+      return item;
+    }
+
     if (n.kind === "runner") {
       const r = n.runner;
       const alias = this.aliases[r.runner_id];
@@ -306,7 +397,7 @@ export class RunnersProvider implements vscode.TreeDataProvider<RunnerNode> {
       item.tooltip = new vscode.MarkdownString(
         (alias ? `**${alias}**  \u00b7  hostname: ${r.hostname}\n\n` : `**${r.hostname}**\n\n`) +
           (isLocal ? "_(this host)_\n\n" : "") +
-          `- runner_id: \`${r.runner_id}\`\n- state: ${r.state}\n- os: ${r.os} (${r.arch})\n- tags: ${tags}\n- scope: ${scopes}\n` +
+          `- runner_id: \`${r.runner_id}\`\n- kind: \`${n.parent}\`\n- state: ${r.state}\n- os: ${r.os} (${r.arch})\n- tags: ${tags}\n- scope: ${scopes}\n` +
           `- last heartbeat: ${r.last_heartbeat ?? "?"}\n- load: ${r.current_load}/${r.max_concurrent}`
       );
       return item;
