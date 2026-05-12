@@ -24,7 +24,72 @@ export interface RunnerInfo {
   max_concurrent: number;
   last_heartbeat?: string;
   drain_requested?: boolean;
+  workspace_root?: string;
+  tenant?: string;
+  poll_interval?: number;
+  alias?: string;
   [key: string]: unknown;
+}
+
+export interface DispatcherInfo {
+  dispatcher_id: string;
+  label: string;
+  hostname?: string | null;
+  metadata: Record<string, unknown>;
+  first_seen?: string;
+  last_seen?: string;
+  [key: string]: unknown;
+}
+
+export interface ApprovalInfo {
+  approval_id: string;
+  status: string;
+  envelope_hash?: string;
+  task_label?: string;
+  branch?: string;
+  scope_globs?: string[];
+  created_at?: string;
+  resolved_at?: string | null;
+  approver?: string | null;
+  reason?: string | null;
+  [key: string]: unknown;
+}
+
+export interface SecretInfo {
+  name: string;
+  version?: number;
+  created_at?: string;
+  last_rotated_at?: string | null;
+  [key: string]: unknown;
+}
+
+export interface AuditEvent {
+  id?: number;
+  task_id?: number | null;
+  event_type?: string;
+  hash?: string;
+  prev_hash?: string;
+  created_at?: string;
+  payload?: unknown;
+  [key: string]: unknown;
+}
+
+export interface ClusterHealth {
+  backend: string;
+  rqlite: { host: string; port: number; consistency: string } | null;
+  labels_snapshot: {
+    status: string | null;
+    applied: number;
+    path: string | null;
+    exists: boolean;
+    size_bytes: number | null;
+    mtime: number | null;
+  };
+}
+
+export interface LabelsInfo {
+  hub_name: string;
+  runner_aliases: Record<string, string>;
 }
 
 export interface TaskInfo {
@@ -162,9 +227,9 @@ export class HubClient {
     return this.request("GET", "/healthz");
   }
 
-  async getLabels(): Promise<{ hub_name: string; runner_aliases: Record<string, string> }> {
+  async getLabels(): Promise<LabelsInfo> {
     try {
-      return await this.request("GET", "/labels");
+      return await this.request<LabelsInfo>("GET", "/labels");
     } catch {
       return { hub_name: "", runner_aliases: {} };
     }
@@ -192,6 +257,54 @@ export class HubClient {
   async listRunners(): Promise<RunnerInfo[]> {
     const j = await this.request<{ runners: RunnerInfo[] }>("GET", "/runners");
     return j.runners ?? [];
+  }
+
+  async listDispatchers(): Promise<DispatcherInfo[]> {
+    const j = await this.request<{ dispatchers: DispatcherInfo[] }>("GET", "/dispatchers");
+    return j.dispatchers ?? [];
+  }
+
+  async listApprovals(status?: string, limit = 200): Promise<ApprovalInfo[]> {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (status) {
+      params.set("status", status);
+    }
+    const j = await this.request<{ approvals: ApprovalInfo[] }>(
+      "GET",
+      `/approvals?${params.toString()}`
+    );
+    return j.approvals ?? [];
+  }
+
+  async approveApproval(id: string, approver: string, reason?: string): Promise<void> {
+    await this.request("POST", `/approvals/${encodeURIComponent(id)}/approve`, {
+      approver,
+      reason: reason ?? "",
+    });
+  }
+
+  async denyApproval(id: string, approver: string, reason?: string): Promise<void> {
+    await this.request("POST", `/approvals/${encodeURIComponent(id)}/deny`, {
+      approver,
+      reason: reason ?? "",
+    });
+  }
+
+  async listSecrets(): Promise<SecretInfo[]> {
+    const j = await this.request<{ secrets: SecretInfo[] }>("GET", "/secrets");
+    return j.secrets ?? [];
+  }
+
+  async auditTail(): Promise<{ chain_tail: unknown }> {
+    return this.request("GET", "/audit/tail");
+  }
+
+  async auditDay(day: string): Promise<{ day: string; events: AuditEvent[]; verified: boolean; error: string | null }> {
+    return this.request("GET", `/audit/day/${encodeURIComponent(day)}`);
+  }
+
+  async clusterHealth(): Promise<ClusterHealth> {
+    return this.request<ClusterHealth>("GET", "/cluster/health");
   }
 
   async listTasks(limit = 50, status?: string): Promise<TaskInfo[]> {

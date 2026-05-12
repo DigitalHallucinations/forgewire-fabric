@@ -11,14 +11,30 @@ import * as path from "path";
 import * as fs from "fs";
 import * as vscode from "vscode";
 import { HubClient } from "./hubClient";
-import { HubProvider, RunnersProvider, TasksProvider } from "./treeProviders";
+import {
+  ApprovalsProvider,
+  AuditProvider,
+  DispatchersProvider,
+  HostsProvider,
+  HubProvider,
+  LabelsProvider,
+  RunnersProvider,
+  SecretsProvider,
+  TasksProvider,
+} from "./treeProviders";
 
 const SECRET_TOKEN_KEY = "forgewireFabric.hubToken";
 
 let outputChannel: vscode.OutputChannel;
 let statusItem: vscode.StatusBarItem;
 let hubProvider: HubProvider;
+let hostsProvider: HostsProvider;
 let runnersProvider: RunnersProvider;
+let dispatchersProvider: DispatchersProvider;
+let approvalsProvider: ApprovalsProvider;
+let auditProvider: AuditProvider;
+let secretsProvider: SecretsProvider;
+let labelsProvider: LabelsProvider;
 let tasksProvider: TasksProvider;
 let refreshTimer: NodeJS.Timeout | undefined;
 let context: vscode.ExtensionContext;
@@ -45,11 +61,23 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<void> {
   await hydrateTokenFromSecret();
 
   hubProvider = new HubProvider(getClient, getProbe);
+  hostsProvider = new HostsProvider(getClient);
   runnersProvider = new RunnersProvider(getClient);
+  dispatchersProvider = new DispatchersProvider(getClient);
+  approvalsProvider = new ApprovalsProvider(getClient);
+  auditProvider = new AuditProvider(getClient);
+  secretsProvider = new SecretsProvider(getClient);
+  labelsProvider = new LabelsProvider(getClient);
   tasksProvider = new TasksProvider(getClient);
   ctx.subscriptions.push(
     vscode.window.registerTreeDataProvider("forgewireFabric.hub", hubProvider),
+    vscode.window.registerTreeDataProvider("forgewireFabric.hosts", hostsProvider),
     vscode.window.registerTreeDataProvider("forgewireFabric.runners", runnersProvider),
+    vscode.window.registerTreeDataProvider("forgewireFabric.dispatchers", dispatchersProvider),
+    vscode.window.registerTreeDataProvider("forgewireFabric.approvals", approvalsProvider),
+    vscode.window.registerTreeDataProvider("forgewireFabric.audit", auditProvider),
+    vscode.window.registerTreeDataProvider("forgewireFabric.secrets", secretsProvider),
+    vscode.window.registerTreeDataProvider("forgewireFabric.labels", labelsProvider),
     vscode.window.registerTreeDataProvider("forgewireFabric.tasks", tasksProvider)
   );
 
@@ -179,6 +207,12 @@ async function probeAndRefresh(): Promise<void> {
   hubProvider?.refresh();
   runnersProvider?.refresh();
   tasksProvider?.refresh();
+  hostsProvider?.refresh();
+  dispatchersProvider?.refresh();
+  approvalsProvider?.refresh();
+  auditProvider?.refresh();
+  secretsProvider?.refresh();
+  labelsProvider?.refresh();
 }
 
 async function hydrateTokenFromSecret(): Promise<void> {

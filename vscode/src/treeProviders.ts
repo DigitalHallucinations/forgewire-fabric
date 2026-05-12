@@ -1,6 +1,15 @@
 import * as os from "os";
 import * as vscode from "vscode";
-import { HubClient, RunnerInfo, TaskInfo } from "./hubClient";
+import {
+  ApprovalInfo,
+  AuditEvent,
+  ClusterHealth,
+  DispatcherInfo,
+  HubClient,
+  RunnerInfo,
+  SecretInfo,
+  TaskInfo,
+} from "./hubClient";
 
 // ---------------------------------------------------------------------------
 // Hub
@@ -377,6 +386,44 @@ function runnerProps(r: RunnerInfo, aliases: Record<string, string>): RunnerNode
       icon: "history",
     }
   );
+  if (r.workspace_root) {
+    props.push({
+      kind: "prop",
+      runner: r,
+      key: "workspace_root",
+      label: "Workspace root",
+      description: String(r.workspace_root),
+      icon: "root-folder",
+    });
+  }
+  if (r.tenant) {
+    props.push({
+      kind: "prop",
+      runner: r,
+      key: "tenant",
+      label: "Tenant",
+      description: String(r.tenant),
+      icon: "organization",
+    });
+  }
+  if (typeof r.poll_interval === "number") {
+    props.push({
+      kind: "prop",
+      runner: r,
+      key: "poll_interval",
+      label: "Poll interval",
+      description: `${r.poll_interval}s`,
+      icon: "watch",
+    });
+  }
+  props.push({
+    kind: "prop",
+    runner: r,
+    key: "capacity",
+    label: "Max concurrent",
+    description: String(r.max_concurrent),
+    icon: "dashboard",
+  });
   return props;
 }
 
@@ -518,4 +565,680 @@ function formatUptime(seconds: number | undefined): string {
   if (h > 0) return `${h}h ${m}m`;
   if (m > 0) return `${m}m ${s}s`;
   return `${s}s`;
+}
+
+// ---------------------------------------------------------------------------
+// Hosts (cluster-typed taxonomy: Loom + Fabric, with cluster health)
+//
+// A "host" is a physical/virtual machine identified by hostname that may
+// be running one or more roles (hub, runner, dispatcher). The Hosts view
+// groups by cluster type ("Fabric" = rqlite-backed forgewire-fabric;
+// "Loom" = reserved for the second backend that's not yet wired) and lets
+// the operator see at a glance which boxes are participating and which
+// roles each is running.
+// ---------------------------------------------------------------------------
+
+export type HostsNode =
+  | { kind: "cluster"; cluster: "fabric" | "loom"; label: string; backend: string | null }
+  | { kind: "host"; cluster: "fabric" | "loom"; hostname: string; roles: string[]; runners: RunnerInfo[]; dispatchers: DispatcherInfo[] }
+  | { kind: "role"; hostname: string; role: string; description: string; tooltip?: string; icon: string }
+  | { kind: "health"; key: string; label: string; description: string; icon: string; tooltip?: string; color?: string }
+  | { kind: "placeholder"; label: string; description?: string; icon: string };
+
+export class HostsProvider implements vscode.TreeDataProvider<HostsNode> {
+  private readonly _onDidChange = new vscode.EventEmitter<HostsNode | undefined | void>();
+  readonly onDidChangeTreeData = this._onDidChange.event;
+
+  private fabricHosts: Map<string, { runners: RunnerInfo[]; dispatchers: DispatcherInfo[] }> = new Map();
+  private health: ClusterHealth | undefined;
+
+  constructor(private readonly client: () => HubClient | undefined) {}
+
+  refresh(): void {
+    this._onDidChange.fire();
+  }
+
+  async getChildren(element?: HostsNode): Promise<HostsNode[]> {
+    const c = this.client();
+    if (!element) {
+      // Top level: cluster groups
+      return [
+        { kind: "cluster", cluster: "fabric", label: "Fabric", backend: this.health?.backend ?? null },
+        { kind: "cluster", cluster: "loom", label: "Loom", backend: null },
+      ];
+    }
+    if (element.kind === "cluster") {
+      if (element.cluster === "loom") {
+        return [
+          {
+            kind: "placeholder",
+            label: "No Loom cluster configured",
+            description: "reserved for substrate backend",
+            icon: "circle-slash",
+          },
+        ];
+      }
+      // Fabric: load runners + dispatchers + cluster health
+      if (!c) {
+        return [
+          { kind: "placeholder", label: "Not connected", icon: "debug-disconnect" },
+        ];
+      }
+      const nodes: HostsNode[] = [];
+      try {
+        const [runners, dispatchers, health] = await Promise.all([
+          c.listRunners().catch(() => [] as RunnerInfo[]),
+          c.listDispatchers().catch(() => [] as DispatcherInfo[]),
+          c.clusterHealth().catch(() => undefined as ClusterHealth | undefined),
+        ]);
+        this.health = health;
+        this.fabricHosts = aggregateHosts(runners, dispatchers);
+        // Cluster Health sub-section first (always visible).
+        nodes.push(...healthNodes(health));
+        // Then one node per discovered host.
+        for (const [hostname, agg] of this.fabricHosts) {
+          const roles: string[] = [];
+          if (agg.runners.length) roles.push(`runner${agg.runners.length > 1 ? `\u00d7${agg.runners.length}` : ""}`);
+          if (agg.dispatchers.length) roles.push(`dispatcher${agg.dispatchers.length > 1 ? `\u00d7${agg.dispatchers.length}` : ""}`);
+          nodes.push({
+            kind: "host",
+            cluster: "fabric",
+            hostname,
+            roles,
+            runners: agg.runners,
+            dispatchers: agg.dispatchers,
+          });
+        }
+        if (this.fabricHosts.size === 0) {
+          nodes.push({
+            kind: "placeholder",
+            label: "No hosts registered",
+            description: "no runners or dispatchers have reported in",
+            icon: "inbox",
+          });
+        }
+      } catch (err) {
+        nodes.push({
+          kind: "placeholder",
+          label: "Hub unreachable",
+          description: err instanceof Error ? err.message : String(err),
+          icon: "warning",
+        });
+      }
+      return nodes;
+    }
+    if (element.kind === "host") {
+      const out: HostsNode[] = [];
+      for (const r of element.runners) {
+        out.push({
+          kind: "role",
+          hostname: element.hostname,
+          role: "runner",
+          description: `${r.state} \u00b7 ${r.runner_id.slice(0, 8)}`,
+          icon: "server",
+          tooltip: `Runner ${r.runner_id}`,
+        });
+      }
+      for (const d of element.dispatchers) {
+        out.push({
+          kind: "role",
+          hostname: element.hostname,
+          role: "dispatcher",
+          description: `${d.label} \u00b7 ${d.dispatcher_id.slice(0, 8)}`,
+          icon: "rocket",
+          tooltip: `Dispatcher ${d.dispatcher_id} (last seen ${d.last_seen ?? "?"})`,
+        });
+      }
+      return out;
+    }
+    return [];
+  }
+
+  getTreeItem(n: HostsNode): vscode.TreeItem {
+    if (n.kind === "cluster") {
+      const item = new vscode.TreeItem(n.label, vscode.TreeItemCollapsibleState.Expanded);
+      item.id = `hosts:cluster:${n.cluster}`;
+      item.iconPath = new vscode.ThemeIcon(n.cluster === "fabric" ? "circuit-board" : "globe");
+      const badge = n.backend ? n.backend : n.cluster === "loom" ? "n/a" : "?";
+      item.description = badge;
+      item.contextValue = `hosts.cluster.${n.cluster}`;
+      item.tooltip =
+        n.cluster === "fabric"
+          ? `ForgeWire Fabric (rqlite/sqlite backend). Active: ${n.backend ?? "unknown"}.`
+          : "Loom: substrate cluster (forgewire_core). Not yet wired into the hub.";
+      return item;
+    }
+    if (n.kind === "host") {
+      const item = new vscode.TreeItem(n.hostname, vscode.TreeItemCollapsibleState.Collapsed);
+      item.id = `hosts:host:${n.cluster}:${n.hostname}`;
+      const isLocal = n.hostname.toLowerCase() === os.hostname().toLowerCase();
+      item.description = n.roles.join(" + ") + (isLocal ? " \u00b7 this host" : "");
+      item.iconPath = new vscode.ThemeIcon(
+        "device-desktop",
+        isLocal ? new vscode.ThemeColor("charts.blue") : undefined
+      );
+      item.contextValue = `hosts.host.${n.cluster}`;
+      item.tooltip = `${n.hostname} \u2014 ${n.runners.length} runner(s), ${n.dispatchers.length} dispatcher(s)`;
+      return item;
+    }
+    if (n.kind === "role") {
+      const item = new vscode.TreeItem(n.role, vscode.TreeItemCollapsibleState.None);
+      item.id = `hosts:role:${n.hostname}:${n.role}:${n.description}`;
+      item.description = n.description;
+      item.iconPath = new vscode.ThemeIcon(n.icon);
+      item.contextValue = `hosts.role.${n.role}`;
+      if (n.tooltip) item.tooltip = n.tooltip;
+      return item;
+    }
+    if (n.kind === "health") {
+      const item = new vscode.TreeItem(n.label, vscode.TreeItemCollapsibleState.None);
+      item.id = `hosts:health:${n.key}`;
+      item.description = n.description;
+      item.iconPath = n.color
+        ? new vscode.ThemeIcon(n.icon, new vscode.ThemeColor(n.color))
+        : new vscode.ThemeIcon(n.icon);
+      if (n.tooltip) item.tooltip = n.tooltip;
+      item.contextValue = `hosts.health.${n.key}`;
+      return item;
+    }
+    const item = new vscode.TreeItem(n.label, vscode.TreeItemCollapsibleState.None);
+    item.description = n.description;
+    item.iconPath = new vscode.ThemeIcon(n.icon);
+    item.contextValue = "hosts.placeholder";
+    return item;
+  }
+}
+
+function aggregateHosts(
+  runners: RunnerInfo[],
+  dispatchers: DispatcherInfo[]
+): Map<string, { runners: RunnerInfo[]; dispatchers: DispatcherInfo[] }> {
+  const map = new Map<string, { runners: RunnerInfo[]; dispatchers: DispatcherInfo[] }>();
+  const get = (h: string) => {
+    let agg = map.get(h);
+    if (!agg) {
+      agg = { runners: [], dispatchers: [] };
+      map.set(h, agg);
+    }
+    return agg;
+  };
+  for (const r of runners) {
+    const h = (r.hostname || "(unknown)").trim() || "(unknown)";
+    get(h).runners.push(r);
+  }
+  for (const d of dispatchers) {
+    const h = (d.hostname || "(unknown)").toString().trim() || "(unknown)";
+    get(h).dispatchers.push(d);
+  }
+  return map;
+}
+
+function healthNodes(health: ClusterHealth | undefined): HostsNode[] {
+  if (!health) {
+    return [
+      { kind: "health", key: "status", label: "Cluster health", description: "unknown", icon: "question" },
+    ];
+  }
+  const nodes: HostsNode[] = [];
+  nodes.push({
+    kind: "health",
+    key: "backend",
+    label: "Backend",
+    description: health.backend,
+    icon: "database",
+    color: health.backend === "rqlite" ? "charts.green" : "charts.yellow",
+    tooltip:
+      health.backend === "rqlite"
+        ? `rqlite cluster ${health.rqlite?.host}:${health.rqlite?.port} (consistency=${health.rqlite?.consistency})`
+        : "Legacy single-node sqlite backend.",
+  });
+  const s = health.labels_snapshot;
+  const sidecarColor =
+    s.status === "applied" || s.status === "seeded_from_db"
+      ? "charts.green"
+      : s.status === "absent" || s.status === "disabled"
+        ? "charts.yellow"
+        : "charts.red";
+  const ageStr = s.mtime
+    ? formatUptime(Math.max(0, Math.floor(Date.now() / 1000 - s.mtime)))
+    : "n/a";
+  nodes.push({
+    kind: "health",
+    key: "sidecar",
+    label: "Labels sidecar",
+    description: `${s.status ?? "?"} \u00b7 age ${ageStr}`,
+    icon: s.exists ? "save" : "warning",
+    color: sidecarColor,
+    tooltip: new vscode.MarkdownString(
+      `**Labels snapshot sidecar**\n\n` +
+        `- path: \`${s.path ?? "(disabled)"}\`\n` +
+        `- exists: ${s.exists}\n` +
+        `- bytes: ${s.size_bytes ?? "n/a"}\n` +
+        `- last applied: ${s.applied} row(s)\n` +
+        `- status: \`${s.status ?? "?"}\``
+    ).value,
+  });
+  if (health.rqlite) {
+    nodes.push({
+      kind: "health",
+      key: "rqlite",
+      label: "rqlite",
+      description: `${health.rqlite.host}:${health.rqlite.port} \u00b7 ${health.rqlite.consistency}`,
+      icon: "broadcast",
+    });
+  }
+  return nodes;
+}
+
+// ---------------------------------------------------------------------------
+// Dispatchers
+// ---------------------------------------------------------------------------
+
+export type DispatcherNode =
+  | { kind: "dispatcher"; dispatcher: DispatcherInfo }
+  | { kind: "prop"; dispatcher: DispatcherInfo; key: string; label: string; description: string; icon: string }
+  | { kind: "placeholder"; label: string; description?: string; icon: string };
+
+export class DispatchersProvider implements vscode.TreeDataProvider<DispatcherNode> {
+  private readonly _onDidChange = new vscode.EventEmitter<DispatcherNode | undefined | void>();
+  readonly onDidChangeTreeData = this._onDidChange.event;
+
+  constructor(private readonly client: () => HubClient | undefined) {}
+
+  refresh(): void {
+    this._onDidChange.fire();
+  }
+
+  async getChildren(element?: DispatcherNode): Promise<DispatcherNode[]> {
+    if (element?.kind === "dispatcher") {
+      const d = element.dispatcher;
+      const props: DispatcherNode[] = [
+        { kind: "prop", dispatcher: d, key: "id", label: "Dispatcher ID", description: d.dispatcher_id, icon: "key" },
+        { kind: "prop", dispatcher: d, key: "hostname", label: "Hostname", description: d.hostname ?? "?", icon: "device-desktop" },
+        { kind: "prop", dispatcher: d, key: "last_seen", label: "Last seen", description: d.last_seen ?? "?", icon: "history" },
+        { kind: "prop", dispatcher: d, key: "first_seen", label: "First seen", description: d.first_seen ?? "?", icon: "calendar" },
+      ];
+      for (const [k, v] of Object.entries(d.metadata ?? {})) {
+        props.push({
+          kind: "prop",
+          dispatcher: d,
+          key: `meta.${k}`,
+          label: k,
+          description: typeof v === "string" ? v : JSON.stringify(v),
+          icon: "info",
+        });
+      }
+      return props;
+    }
+    if (element?.kind === "prop" || element?.kind === "placeholder") {
+      return [];
+    }
+    const c = this.client();
+    if (!c) {
+      return [{ kind: "placeholder", label: "Not connected", icon: "debug-disconnect" }];
+    }
+    try {
+      const dispatchers = await c.listDispatchers();
+      if (dispatchers.length === 0) {
+        return [
+          {
+            kind: "placeholder",
+            label: "No dispatchers registered",
+            description: "dispatchers register on first dispatch",
+            icon: "inbox",
+          },
+        ];
+      }
+      return dispatchers.map((d) => ({ kind: "dispatcher" as const, dispatcher: d }));
+    } catch (err) {
+      return [
+        {
+          kind: "placeholder",
+          label: "Hub unreachable",
+          description: err instanceof Error ? err.message : String(err),
+          icon: "warning",
+        },
+      ];
+    }
+  }
+
+  getTreeItem(n: DispatcherNode): vscode.TreeItem {
+    if (n.kind === "dispatcher") {
+      const d = n.dispatcher;
+      const item = new vscode.TreeItem(d.label || d.dispatcher_id.slice(0, 8), vscode.TreeItemCollapsibleState.Collapsed);
+      item.id = `dispatcher:${d.dispatcher_id}`;
+      item.description = d.hostname ?? "";
+      item.iconPath = new vscode.ThemeIcon("rocket");
+      item.contextValue = "dispatcher";
+      item.tooltip = `dispatcher_id: ${d.dispatcher_id}\nhost: ${d.hostname ?? "?"}\nlast_seen: ${d.last_seen ?? "?"}`;
+      return item;
+    }
+    if (n.kind === "prop") {
+      const item = new vscode.TreeItem(n.label, vscode.TreeItemCollapsibleState.None);
+      item.id = `dispatcher:${n.dispatcher.dispatcher_id}:${n.key}`;
+      item.description = n.description;
+      item.iconPath = new vscode.ThemeIcon(n.icon);
+      item.contextValue = `dispatcherProp.${n.key}`;
+      return item;
+    }
+    const item = new vscode.TreeItem(n.label, vscode.TreeItemCollapsibleState.None);
+    item.description = n.description;
+    item.iconPath = new vscode.ThemeIcon(n.icon);
+    item.contextValue = "dispatcher.placeholder";
+    return item;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Approvals (M2.5.1 human-in-the-loop)
+// ---------------------------------------------------------------------------
+
+export type ApprovalNode =
+  | { kind: "approval"; approval: ApprovalInfo }
+  | { kind: "placeholder"; label: string; description?: string; icon: string };
+
+export class ApprovalsProvider implements vscode.TreeDataProvider<ApprovalNode> {
+  private readonly _onDidChange = new vscode.EventEmitter<ApprovalNode | undefined | void>();
+  readonly onDidChangeTreeData = this._onDidChange.event;
+
+  constructor(private readonly client: () => HubClient | undefined) {}
+
+  refresh(): void {
+    this._onDidChange.fire();
+  }
+
+  async getChildren(element?: ApprovalNode): Promise<ApprovalNode[]> {
+    if (element) return [];
+    const c = this.client();
+    if (!c) return [{ kind: "placeholder", label: "Not connected", icon: "debug-disconnect" }];
+    try {
+      const approvals = await c.listApprovals("pending", 100);
+      if (approvals.length === 0) {
+        return [{ kind: "placeholder", label: "No pending approvals", icon: "check", description: "queue is clear" }];
+      }
+      return approvals.map((a) => ({ kind: "approval" as const, approval: a }));
+    } catch (err) {
+      return [
+        {
+          kind: "placeholder",
+          label: "Hub unreachable",
+          description: err instanceof Error ? err.message : String(err),
+          icon: "warning",
+        },
+      ];
+    }
+  }
+
+  getTreeItem(n: ApprovalNode): vscode.TreeItem {
+    if (n.kind === "placeholder") {
+      const item = new vscode.TreeItem(n.label, vscode.TreeItemCollapsibleState.None);
+      item.description = n.description;
+      item.iconPath = new vscode.ThemeIcon(n.icon);
+      item.contextValue = "approval.placeholder";
+      return item;
+    }
+    const a = n.approval;
+    const item = new vscode.TreeItem(a.task_label || a.approval_id.slice(0, 12), vscode.TreeItemCollapsibleState.None);
+    item.id = `approval:${a.approval_id}`;
+    item.description = `${a.status} \u00b7 ${a.branch ?? ""}`;
+    item.iconPath = new vscode.ThemeIcon(
+      a.status === "pending" ? "circle-large-outline" : a.status === "approved" ? "check" : "circle-slash",
+      a.status === "pending" ? new vscode.ThemeColor("charts.yellow") : undefined
+    );
+    item.contextValue = `approval.${a.status}`;
+    item.tooltip = new vscode.MarkdownString(
+      `**${a.task_label ?? a.approval_id}**\n\n` +
+        `- approval_id: \`${a.approval_id}\`\n` +
+        `- status: \`${a.status}\`\n` +
+        `- branch: \`${a.branch ?? "?"}\`\n` +
+        `- scope: \`${(a.scope_globs ?? []).join(", ")}\`\n` +
+        `- created: ${a.created_at ?? "?"}\n` +
+        (a.resolved_at ? `- resolved: ${a.resolved_at} by ${a.approver ?? "?"}\n` : "") +
+        (a.reason ? `- reason: ${a.reason}\n` : "")
+    ).value;
+    return item;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Audit log (M2.5.3 hash-chained audit)
+// ---------------------------------------------------------------------------
+
+export type AuditNode =
+  | { kind: "header"; label: string; description: string; icon: string; tooltip?: string }
+  | { kind: "event"; event: AuditEvent }
+  | { kind: "placeholder"; label: string; description?: string; icon: string };
+
+export class AuditProvider implements vscode.TreeDataProvider<AuditNode> {
+  private readonly _onDidChange = new vscode.EventEmitter<AuditNode | undefined | void>();
+  readonly onDidChangeTreeData = this._onDidChange.event;
+
+  constructor(private readonly client: () => HubClient | undefined) {}
+
+  refresh(): void {
+    this._onDidChange.fire();
+  }
+
+  async getChildren(element?: AuditNode): Promise<AuditNode[]> {
+    if (element) return [];
+    const c = this.client();
+    if (!c) return [{ kind: "placeholder", label: "Not connected", icon: "debug-disconnect" }];
+    try {
+      const tail = await c.auditTail().catch(() => ({ chain_tail: null }));
+      const today = new Date().toISOString().slice(0, 10);
+      const day = await c.auditDay(today).catch(() => ({ day: today, events: [] as AuditEvent[], verified: false, error: "unavailable" }));
+      const nodes: AuditNode[] = [
+        {
+          kind: "header",
+          label: "Chain tail",
+          description: typeof (tail as any).chain_tail === "string"
+            ? ((tail as any).chain_tail as string).slice(0, 16) + "\u2026"
+            : "n/a",
+          icon: "key",
+          tooltip: typeof (tail as any).chain_tail === "string" ? (tail as any).chain_tail : "no audit events yet",
+        },
+        {
+          kind: "header",
+          label: `Today (${today})`,
+          description: `${day.events.length} event(s) \u00b7 verified=${day.verified}`,
+          icon: day.verified ? "verified" : "warning",
+          tooltip: day.error ? `verification error: ${day.error}` : `${day.events.length} events on ${today}`,
+        },
+      ];
+      const recent = (day.events ?? []).slice(-25).reverse();
+      for (const e of recent) {
+        nodes.push({ kind: "event", event: e });
+      }
+      if (recent.length === 0) {
+        nodes.push({ kind: "placeholder", label: "No events today", icon: "inbox" });
+      }
+      return nodes;
+    } catch (err) {
+      return [
+        {
+          kind: "placeholder",
+          label: "Hub unreachable",
+          description: err instanceof Error ? err.message : String(err),
+          icon: "warning",
+        },
+      ];
+    }
+  }
+
+  getTreeItem(n: AuditNode): vscode.TreeItem {
+    if (n.kind === "header") {
+      const item = new vscode.TreeItem(n.label, vscode.TreeItemCollapsibleState.None);
+      item.description = n.description;
+      item.iconPath = new vscode.ThemeIcon(n.icon);
+      if (n.tooltip) item.tooltip = n.tooltip;
+      item.contextValue = "audit.header";
+      return item;
+    }
+    if (n.kind === "placeholder") {
+      const item = new vscode.TreeItem(n.label, vscode.TreeItemCollapsibleState.None);
+      item.description = n.description;
+      item.iconPath = new vscode.ThemeIcon(n.icon);
+      item.contextValue = "audit.placeholder";
+      return item;
+    }
+    const e = n.event;
+    const label = e.event_type ?? "event";
+    const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.None);
+    item.id = `audit:${e.id ?? Math.random()}`;
+    item.description = `task=${e.task_id ?? "-"} \u00b7 ${e.created_at ?? "?"}`;
+    item.iconPath = new vscode.ThemeIcon("note");
+    item.contextValue = "audit.event";
+    item.tooltip = new vscode.MarkdownString(
+      `**${label}**\n\n` +
+        `- task_id: ${e.task_id ?? "?"}\n` +
+        `- hash: \`${(e.hash ?? "").slice(0, 24)}\u2026\`\n` +
+        `- prev: \`${(e.prev_hash ?? "").slice(0, 24)}\u2026\`\n` +
+        `- created: ${e.created_at ?? "?"}\n` +
+        (e.payload ? "\n```json\n" + JSON.stringify(e.payload, null, 2).slice(0, 800) + "\n```" : "")
+    ).value;
+    return item;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Secrets (M2.5.5a sealed broker -- metadata only, never values)
+// ---------------------------------------------------------------------------
+
+export type SecretNode =
+  | { kind: "secret"; secret: SecretInfo }
+  | { kind: "placeholder"; label: string; description?: string; icon: string };
+
+export class SecretsProvider implements vscode.TreeDataProvider<SecretNode> {
+  private readonly _onDidChange = new vscode.EventEmitter<SecretNode | undefined | void>();
+  readonly onDidChangeTreeData = this._onDidChange.event;
+
+  constructor(private readonly client: () => HubClient | undefined) {}
+
+  refresh(): void {
+    this._onDidChange.fire();
+  }
+
+  async getChildren(element?: SecretNode): Promise<SecretNode[]> {
+    if (element) return [];
+    const c = this.client();
+    if (!c) return [{ kind: "placeholder", label: "Not connected", icon: "debug-disconnect" }];
+    try {
+      const secrets = await c.listSecrets();
+      if (secrets.length === 0) {
+        return [{ kind: "placeholder", label: "No secrets stored", description: "use the CLI to seal one", icon: "lock" }];
+      }
+      return secrets.map((s) => ({ kind: "secret" as const, secret: s }));
+    } catch (err) {
+      return [
+        {
+          kind: "placeholder",
+          label: "Hub unreachable",
+          description: err instanceof Error ? err.message : String(err),
+          icon: "warning",
+        },
+      ];
+    }
+  }
+
+  getTreeItem(n: SecretNode): vscode.TreeItem {
+    if (n.kind === "placeholder") {
+      const item = new vscode.TreeItem(n.label, vscode.TreeItemCollapsibleState.None);
+      item.description = n.description;
+      item.iconPath = new vscode.ThemeIcon(n.icon);
+      item.contextValue = "secret.placeholder";
+      return item;
+    }
+    const s = n.secret;
+    const item = new vscode.TreeItem(s.name, vscode.TreeItemCollapsibleState.None);
+    item.id = `secret:${s.name}`;
+    item.description = `v${s.version ?? 1}`;
+    item.iconPath = new vscode.ThemeIcon("lock", new vscode.ThemeColor("charts.green"));
+    item.contextValue = "secret";
+    item.tooltip = new vscode.MarkdownString(
+      `**${s.name}** (sealed)\n\n` +
+        `- version: ${s.version ?? 1}\n` +
+        `- created: ${s.created_at ?? "?"}\n` +
+        `- last_rotated: ${s.last_rotated_at ?? "never"}\n\n` +
+        `_Values are never exposed via the API._`
+    ).value;
+    return item;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Labels (cosmetic hub name + per-runner aliases; inline rename)
+// ---------------------------------------------------------------------------
+
+export type LabelNode =
+  | { kind: "hub"; name: string }
+  | { kind: "alias"; runnerId: string; alias: string }
+  | { kind: "placeholder"; label: string; description?: string; icon: string };
+
+export class LabelsProvider implements vscode.TreeDataProvider<LabelNode> {
+  private readonly _onDidChange = new vscode.EventEmitter<LabelNode | undefined | void>();
+  readonly onDidChangeTreeData = this._onDidChange.event;
+
+  constructor(private readonly client: () => HubClient | undefined) {}
+
+  refresh(): void {
+    this._onDidChange.fire();
+  }
+
+  async getChildren(element?: LabelNode): Promise<LabelNode[]> {
+    if (element) return [];
+    const c = this.client();
+    if (!c) return [{ kind: "placeholder", label: "Not connected", icon: "debug-disconnect" }];
+    try {
+      const labels = await c.getLabels();
+      const nodes: LabelNode[] = [{ kind: "hub", name: labels.hub_name || "" }];
+      for (const [rid, alias] of Object.entries(labels.runner_aliases ?? {})) {
+        nodes.push({ kind: "alias", runnerId: rid, alias });
+      }
+      if (Object.keys(labels.runner_aliases ?? {}).length === 0) {
+        nodes.push({
+          kind: "placeholder",
+          label: "No runner aliases",
+          description: "right-click a runner to set one",
+          icon: "info",
+        });
+      }
+      return nodes;
+    } catch (err) {
+      return [
+        {
+          kind: "placeholder",
+          label: "Hub unreachable",
+          description: err instanceof Error ? err.message : String(err),
+          icon: "warning",
+        },
+      ];
+    }
+  }
+
+  getTreeItem(n: LabelNode): vscode.TreeItem {
+    if (n.kind === "hub") {
+      const item = new vscode.TreeItem("Hub name", vscode.TreeItemCollapsibleState.None);
+      item.id = "label:hub";
+      item.description = n.name || "(unset)";
+      item.iconPath = new vscode.ThemeIcon("tag");
+      item.contextValue = "label.hub";
+      item.command = { command: "forgewireFabric.renameHub", title: "Rename Hub" };
+      item.tooltip = "Click to rename the hub fabric-wide.";
+      return item;
+    }
+    if (n.kind === "alias") {
+      const item = new vscode.TreeItem(n.alias || "(unset)", vscode.TreeItemCollapsibleState.None);
+      item.id = `label:alias:${n.runnerId}`;
+      item.description = n.runnerId.slice(0, 8);
+      item.iconPath = new vscode.ThemeIcon("symbol-string");
+      item.contextValue = "label.alias";
+      item.tooltip = `Runner ${n.runnerId}\nClick to rename via the Runners view.`;
+      return item;
+    }
+    const item = new vscode.TreeItem(n.label, vscode.TreeItemCollapsibleState.None);
+    item.description = n.description;
+    item.iconPath = new vscode.ThemeIcon(n.icon);
+    item.contextValue = "label.placeholder";
+    return item;
+  }
 }
