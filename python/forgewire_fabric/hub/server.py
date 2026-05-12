@@ -168,6 +168,16 @@ class BlackboardConfig:
     # branch, scope_globs}`` to this URL with a 5s timeout. Failures are
     # logged but never block the dispatch path.
     approval_webhook_url: str | None = None
+    # Labels snapshot sidecar. The hub mirrors the contents of the
+    # ``labels`` table (``hub_name`` + ``runner_alias:<runner_id>`` rows)
+    # to this JSON file on every successful write, and re-applies the
+    # file on startup. This protects operator-set names from accidental
+    # rqlite table wipes, schema rebuilds, or DR restores from a
+    # snapshot that pre-dates the rename. ``None`` resolves to
+    # ``<db_path>.parent / "labels.snapshot.json"`` inside Blackboard;
+    # set to ``Path("")`` (or env ``FORGEWIRE_HUB_LABELS_SNAPSHOT=``
+    # empty) to disable entirely.
+    labels_snapshot_path: Path | None = None
 
 
 class Blackboard:
@@ -186,6 +196,7 @@ class Blackboard:
         rqlite_port: int = 4001,
         rqlite_consistency: str = "strong",
         secrets_backend: str | None = None,
+        labels_snapshot_path: Path | None = None,
     ) -> None:
         if backend not in ("sqlite", "rqlite"):
             raise ValueError(f"unknown backend {backend!r}")
@@ -256,6 +267,26 @@ class Blackboard:
         self._secret_broker = SecretBroker(
             _default_secret_key_provider(db_path=db_path, backend=secrets_backend)
         )
+
+        # Labels snapshot sidecar. ``None`` (the common case) resolves
+        # to ``<db_path>.parent / "labels.snapshot.json"``. An explicit
+        # ``Path("")`` (which Pathlib normalises to ``Path(".")``)
+        # disables the sidecar entirely -- used by tests that don't
+        # want filesystem side-effects, and by operators on read-only
+        # volumes.
+        if labels_snapshot_path is None:
+            self._labels_snapshot_path: Path | None = (
+                db_path.parent / "labels.snapshot.json"
+            )
+        elif str(labels_snapshot_path) in ("", "."):
+            self._labels_snapshot_path = None
+        else:
+            self._labels_snapshot_path = labels_snapshot_path
+        # Re-entrancy guard: ``restore_labels_from_snapshot`` calls
+        # ``_upsert_label`` which would normally trigger
+        # ``_write_labels_snapshot`` -- pointless during restore and
+        # could corrupt the sidecar mid-read on a buggy filesystem.
+        self._suppress_snapshot_writeback = False
 
     # ------------------------------------------------------------------ infra
 
@@ -510,6 +541,118 @@ class Blackboard:
                     (key, value, updated_by),
                 )
             conn.commit()
+        if not self._suppress_snapshot_writeback:
+            self._write_labels_snapshot()
+
+    # ----- labels snapshot sidecar (filesystem mirror) ----------------
+
+    def _write_labels_snapshot(self) -> None:
+        """Atomically mirror the live ``labels`` table to disk.
+
+        Best-effort: any IO error is logged and swallowed so a stuck
+        disk cannot break the hub's write path. The on-disk shape
+        matches ``forgewire-fabric labels export`` so the sidecar can
+        be hand-edited or fed back through the CLI.
+        """
+        path = self._labels_snapshot_path
+        if path is None:
+            return
+        try:
+            payload = self.get_labels()
+            envelope = {
+                "schema": "forgewire-labels-export/1",
+                "exported_at": datetime.now(timezone.utc).isoformat(),
+                "labels": payload,
+            }
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(path.suffix + ".tmp")
+            tmp.write_text(
+                json.dumps(envelope, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            os.replace(tmp, path)
+        except OSError as exc:  # pragma: no cover - filesystem hiccup
+            LOGGER.warning(
+                "labels snapshot write failed (%s): %s", path, exc
+            )
+
+    def restore_labels_from_snapshot(self) -> dict[str, Any]:
+        """Re-apply the on-disk labels sidecar to the live table.
+
+        Idempotent. Every row in the sidecar is upserted via
+        :meth:`_upsert_label`; empty values delete the corresponding
+        row, mirroring the CLI import semantics. Returns a small
+        report describing what was applied so startup logs can
+        record it. Missing or unreadable sidecars are treated as a
+        no-op (status=``"absent"`` / ``"unreadable"``).
+        """
+        path = self._labels_snapshot_path
+        if path is None:
+            return {"status": "disabled", "path": None, "applied": 0}
+        if not path.exists():
+            return {"status": "absent", "path": str(path), "applied": 0}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            LOGGER.warning(
+                "labels snapshot unreadable (%s): %s", path, exc
+            )
+            return {
+                "status": "unreadable",
+                "path": str(path),
+                "applied": 0,
+                "error": str(exc),
+            }
+        if isinstance(data, dict) and "labels" in data:
+            schema = str(data.get("schema") or "")
+            if schema and not schema.startswith("forgewire-labels-export/"):
+                LOGGER.warning(
+                    "labels snapshot has unknown schema %r at %s",
+                    schema,
+                    path,
+                )
+                return {
+                    "status": "unknown_schema",
+                    "path": str(path),
+                    "applied": 0,
+                    "schema": schema,
+                }
+            payload = data["labels"]
+        else:
+            payload = data
+        if not isinstance(payload, dict):
+            LOGGER.warning(
+                "labels snapshot payload is not an object at %s", path
+            )
+            return {"status": "invalid", "path": str(path), "applied": 0}
+        hub_name = str(payload.get("hub_name", "") or "")
+        aliases = payload.get("runner_aliases") or {}
+        if not isinstance(aliases, dict):
+            LOGGER.warning(
+                "labels snapshot runner_aliases is not an object at %s", path
+            )
+            return {"status": "invalid", "path": str(path), "applied": 0}
+        applied = 0
+        self._suppress_snapshot_writeback = True
+        try:
+            self._upsert_label("hub_name", hub_name, "labels-snapshot")
+            applied += 1
+            for rid, alias in aliases.items():
+                self._upsert_label(
+                    f"runner_alias:{str(rid)}",
+                    str(alias),
+                    "labels-snapshot",
+                )
+                applied += 1
+        finally:
+            self._suppress_snapshot_writeback = False
+        return {
+            "status": "applied",
+            "path": str(path),
+            "applied": applied,
+            "hub_name": hub_name,
+            "alias_count": len(aliases),
+        }
 
     # ------------------------------------------------------------ approvals
 
@@ -2348,7 +2491,19 @@ def create_app(config: BlackboardConfig) -> FastAPI:
         rqlite_host=config.rqlite_host,
         rqlite_port=config.rqlite_port,
         rqlite_consistency=config.rqlite_consistency,
+        labels_snapshot_path=config.labels_snapshot_path,
     )
+    # Re-assert operator-set labels (hub_name + runner aliases) from the
+    # on-disk sidecar. Idempotent; missing file is a no-op. Logged so an
+    # operator can confirm the restore happened on every redeploy.
+    snapshot_report = blackboard.restore_labels_from_snapshot()
+    LOGGER.info(
+        "labels snapshot restore: status=%s applied=%s path=%s",
+        snapshot_report.get("status"),
+        snapshot_report.get("applied"),
+        snapshot_report.get("path"),
+    )
+    app.state.labels_snapshot_report = snapshot_report
     app.state.blackboard = blackboard
     app.state.token = config.token
     app.state.started_at = time.time()
@@ -3756,6 +3911,18 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "branch, scope_globs, decision}. Failures are logged, never blocking."
         ),
     )
+    parser.add_argument(
+        "--labels-snapshot",
+        default=os.environ.get("FORGEWIRE_HUB_LABELS_SNAPSHOT"),
+        help=(
+            "Path to the labels snapshot sidecar (JSON). The hub mirrors "
+            "every successful labels write to this file and re-applies it "
+            "on startup so hub_name + runner aliases survive accidental "
+            "table wipes, schema rebuilds, and DR restores. Default: "
+            "<db-path-dir>/labels.snapshot.json. Pass an empty string "
+            "(FORGEWIRE_HUB_LABELS_SNAPSHOT=) to disable."
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -3777,6 +3944,15 @@ def main(argv: list[str] | None = None) -> None:
         rqlite_consistency=args.rqlite_consistency,
         policy_path=Path(args.policy_file).expanduser() if args.policy_file else None,
         approval_webhook_url=args.approval_webhook,
+        labels_snapshot_path=(
+            None
+            if args.labels_snapshot is None
+            else (
+                Path("")
+                if args.labels_snapshot == ""
+                else Path(args.labels_snapshot).expanduser()
+            )
+        ),
     )
     logging.basicConfig(
         level=args.log_level.upper(),

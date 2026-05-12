@@ -250,6 +250,207 @@ def test_alias_survives_runner_dedupe_prune(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Labels snapshot sidecar (filesystem mirror, auto-applied on startup)
+# ---------------------------------------------------------------------------
+
+
+def test_labels_snapshot_writethrough_on_every_label_change(
+    tmp_path: Path,
+) -> None:
+    """Every successful ``_upsert_label`` (set hub_name / set alias /
+    clear alias) must mirror the live ``labels`` table to the on-disk
+    sidecar. The sidecar is the operator's lifeboat against an
+    accidental rqlite table wipe.
+    """
+    db_path = tmp_path / "hub.sqlite3"
+    snap = tmp_path / "labels.snapshot.json"
+    bb = Blackboard(db_path)
+    assert not snap.exists()
+    bb.set_hub_name("Test hub 1")
+    assert snap.exists()
+    after_hub = json.loads(snap.read_text(encoding="utf-8"))
+    assert after_hub["schema"] == "forgewire-labels-export/1"
+    assert after_hub["labels"]["hub_name"] == "Test hub 1"
+    assert after_hub["labels"]["runner_aliases"] == {}
+
+    bb.set_runner_alias("rid-A", "Alpha")
+    after_alias = json.loads(snap.read_text(encoding="utf-8"))
+    assert after_alias["labels"]["runner_aliases"] == {"rid-A": "Alpha"}
+
+    bb.set_runner_alias("rid-A", "")  # clear
+    after_clear = json.loads(snap.read_text(encoding="utf-8"))
+    assert after_clear["labels"]["runner_aliases"] == {}
+    assert after_clear["labels"]["hub_name"] == "Test hub 1"
+
+
+def test_labels_snapshot_restore_re_applies_after_table_wipe(
+    tmp_path: Path,
+) -> None:
+    """Simulate the ``labels`` table being wiped (the destructive bug
+    that motivated this feature). After the wipe, calling
+    ``restore_labels_from_snapshot`` must repopulate hub_name +
+    aliases from the on-disk sidecar.
+    """
+    db_path = tmp_path / "hub.sqlite3"
+    bb = Blackboard(db_path)
+    bb.set_hub_name("Test hub 1")
+    bb.set_runner_alias("rid-A", "Pecision 5520")
+    bb.set_runner_alias("rid-B", "Optiplex 7050t")
+
+    # Wipe the labels table directly, bypassing the sidecar.
+    with bb._connect() as conn:
+        conn.execute("DELETE FROM labels")
+        conn.commit()
+    assert bb.get_labels() == {"hub_name": "", "runner_aliases": {}}
+
+    report = bb.restore_labels_from_snapshot()
+    assert report["status"] == "applied"
+    assert report["applied"] == 3  # hub_name + 2 aliases
+    assert bb.get_labels() == {
+        "hub_name": "Test hub 1",
+        "runner_aliases": {
+            "rid-A": "Pecision 5520",
+            "rid-B": "Optiplex 7050t",
+        },
+    }
+
+
+def test_create_app_auto_restores_labels_snapshot_on_startup(
+    tmp_path: Path,
+) -> None:
+    """The default ``create_app`` flow must auto-apply the sidecar at
+    construction time, before serving any traffic. This is what
+    protects operator names across redeploys.
+    """
+    cfg = _make_cfg(tmp_path)
+    snap = cfg.db_path.parent / "labels.snapshot.json"
+    # Hand-author a sidecar as if a previous hub had written it. The
+    # DB is empty when create_app runs, so the only way the names
+    # appear is via restore.
+    snap.write_text(
+        json.dumps(
+            {
+                "schema": "forgewire-labels-export/1",
+                "labels": {
+                    "hub_name": "Test hub 1",
+                    "runner_aliases": {
+                        "rid-A": "Pecision 5520",
+                        "rid-B": "Optiplex 7050t",
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        r = client.get("/labels", headers=_auth())
+        assert r.status_code == 200, r.text
+        assert r.json() == {
+            "hub_name": "Test hub 1",
+            "runner_aliases": {
+                "rid-A": "Pecision 5520",
+                "rid-B": "Optiplex 7050t",
+            },
+        }
+    # The startup report is surfaced on app.state for log/inspection.
+    report = app.state.labels_snapshot_report
+    assert report["status"] == "applied"
+    assert report["applied"] == 3
+
+
+def test_labels_snapshot_absent_is_noop(tmp_path: Path) -> None:
+    """A fresh install has no sidecar. Startup must not error; the
+    report must reflect ``status="absent"`` so an operator can tell a
+    skipped restore from a successful one in the logs.
+    """
+    cfg = _make_cfg(tmp_path)
+    app = create_app(cfg)
+    report = app.state.labels_snapshot_report
+    assert report["status"] == "absent"
+    assert report["applied"] == 0
+
+
+def test_labels_snapshot_disabled_via_empty_path(tmp_path: Path) -> None:
+    """Operators must be able to opt out (e.g. when the DB lives on a
+    read-only volume). Passing ``Path("")`` disables both the
+    write-through and the startup restore.
+    """
+    cfg = BlackboardConfig(
+        db_path=tmp_path / "hub.sqlite3",
+        token=HUB_TOKEN,
+        host="127.0.0.1",
+        port=0,
+        labels_snapshot_path=Path(""),
+    )
+    app = create_app(cfg)
+    report = app.state.labels_snapshot_report
+    assert report["status"] == "disabled"
+    with TestClient(app) as client:
+        r = client.put(
+            "/labels/hub", json={"name": "no-mirror"}, headers=_auth()
+        )
+        assert r.status_code == 200, r.text
+    # No sidecar file should have been written anywhere.
+    assert list(tmp_path.glob("*.snapshot.json")) == []
+
+
+def test_labels_snapshot_rejects_unknown_schema(tmp_path: Path) -> None:
+    """Unknown-schema sidecars must be skipped, not blindly imported.
+    Same contract as the ``labels import`` CLI."""
+    db_path = tmp_path / "hub.sqlite3"
+    snap = tmp_path / "labels.snapshot.json"
+    snap.write_text(
+        json.dumps(
+            {
+                "schema": "something-else/9",
+                "labels": {"hub_name": "should-not-apply"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    bb = Blackboard(db_path)
+    report = bb.restore_labels_from_snapshot()
+    assert report["status"] == "unknown_schema"
+    assert bb.get_labels()["hub_name"] == ""
+
+
+def test_labels_snapshot_tolerates_bare_payload(tmp_path: Path) -> None:
+    """Tolerate a bare ``{hub_name, runner_aliases}`` JSON (no envelope)
+    so hand-edited sidecars still work, matching ``labels import``."""
+    db_path = tmp_path / "hub.sqlite3"
+    snap = tmp_path / "labels.snapshot.json"
+    snap.write_text(
+        json.dumps(
+            {"hub_name": "bare-ok", "runner_aliases": {"rid-X": "X"}}
+        ),
+        encoding="utf-8",
+    )
+    bb = Blackboard(db_path)
+    report = bb.restore_labels_from_snapshot()
+    assert report["status"] == "applied"
+    assert bb.get_labels() == {
+        "hub_name": "bare-ok",
+        "runner_aliases": {"rid-X": "X"},
+    }
+
+
+def test_labels_snapshot_unreadable_is_logged_not_fatal(
+    tmp_path: Path,
+) -> None:
+    """A corrupt sidecar must not crash startup. Operators can re-export
+    via the CLI to recover; the worst case is that operator names are
+    not auto-restored on this boot."""
+    db_path = tmp_path / "hub.sqlite3"
+    snap = tmp_path / "labels.snapshot.json"
+    snap.write_text("{not valid json", encoding="utf-8")
+    bb = Blackboard(db_path)
+    report = bb.restore_labels_from_snapshot()
+    assert report["status"] == "unreadable"
+    assert "error" in report
+
+
+# ---------------------------------------------------------------------------
 # Runner-config sidecar
 # ---------------------------------------------------------------------------
 
