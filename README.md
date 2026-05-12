@@ -198,9 +198,9 @@ stream counters when running large fleets.
 
 ## Roadmap: Heterogeneous Private Compute
 
-ForgeWire is **not currently** a full distributed compute runtime or cluster scheduler. The current focus is secure remote machine and agent dispatch, event streaming, and result reporting.
+ForgeWire - Fabric is **not currently** a full distributed compute runtime or cluster scheduler. The current focus is secure remote machine and agent dispatch, event streaming, and result reporting.
 
-However, ForgeWire lays the **control-plane foundation** for heterogeneous private compute: a future layer where trusted machines can advertise capabilities, receive scoped work, execute in parallel, stream state, and report results back to an originating controller such as PhrenForge.
+However, ForgeWire - Fabric lays the **control-plane foundation** for heterogeneous private compute: a future layer where trusted machines can advertise capabilities, receive scoped work, execute in parallel, stream state, and report results back to an originating controller such as PhrenForge.
 
 ### Today — remote dispatch fabric
 
