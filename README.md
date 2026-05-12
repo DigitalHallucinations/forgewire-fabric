@@ -21,11 +21,11 @@ Early versions reused a few pieces from [ForgeWire](https://github.com/DigitalHa
 
 ```text
 ForgeWire - Fabric
-├─ Local dispatcher              ← stays in ForgeWire - Fabric
-├─ Blackboard / shared state    ← stays in ForgeWire
-├─ Local tools, agents, workflows
-└─ ForgeWire bridge
-   ├─ Remote machine dispatch
+├─ Local dispatcher               ← stays in ForgeWire 
+├─ Blackboard / shared state      ← stays in ForgeWire
+├─ Local tools, agents, workflows ← stays in ForgeWire
+└─ ForgeWire bridge               
+   ├─ Remote machine dispatch     ← stays in ForgeWire - Fabric
    ├─ Remote agent dispatch
    ├─ Signed dispatch envelopes
    ├─ Capability-scoped execution
