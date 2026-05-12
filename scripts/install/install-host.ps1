@@ -79,6 +79,30 @@ $ErrorActionPreference = "Stop"
 if (-not (Test-Path $PythonExe))     { throw "Python not found: $PythonExe" }
 if (-not (Test-Path $WorkspaceRoot)) { throw "Workspace not found: $WorkspaceRoot" }
 
+function Register-HostRole {
+    param(
+        [Parameter(Mandatory)][string]$Role,
+        [Parameter(Mandatory)][bool]$Enabled,
+        [string]$Status = "installed",
+        [hashtable]$Metadata = @{}
+    )
+
+    $headers = @{ Authorization = "Bearer $($Token.Trim())" }
+    $body = @{
+        hostname = $env:COMPUTERNAME
+        role = $Role
+        enabled = $Enabled
+        status = $Status
+        metadata = $Metadata
+    } | ConvertTo-Json -Depth 8
+    try {
+        Invoke-RestMethod -Method Post -Uri ($HubUrl.TrimEnd('/') + "/hosts/roles") -Headers $headers -ContentType "application/json" -Body $body | Out-Null
+        Write-Host "  Reported host role: $Role=$Enabled ($Status)"
+    } catch {
+        Write-Warning "Could not report host role '$Role' to hub: $($_.Exception.Message)"
+    }
+}
+
 # ---------------------------------------------------------------------------
 # 1) Command runner (NSSM background service).
 # ---------------------------------------------------------------------------
@@ -108,6 +132,11 @@ if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE) {
     throw "nssm-install-runner.ps1 exited with code $LASTEXITCODE."
 }
 Write-Host "==[ Phase 6 / step 1 ]== Command runner installed." -ForegroundColor Green
+Register-HostRole -Role "command_runner" -Enabled $true -Status "installed" -Metadata @{
+    service_name = $ServiceName
+    workspace_root = $WorkspaceRoot
+    max_concurrent = $MaxConcurrent
+}
 
 # ---------------------------------------------------------------------------
 # 2) Agent runner (VS Code MCP server registration).
@@ -122,6 +151,10 @@ Write-Host "==[ Phase 6 / step 1 ]== Command runner installed." -ForegroundColor
 if ($NoAgentMcp) {
     Write-Host ""
     Write-Host "==[ Phase 6 / step 2 ]== Skipping agent runner MCP install (-NoAgentMcp)." -ForegroundColor Yellow
+    Register-HostRole -Role "agent_runner" -Enabled $false -Status "skipped" -Metadata @{
+        reason = "NoAgentMcp"
+        workspace_root = $WorkspaceRoot
+    }
 } else {
     Write-Host ""
     Write-Host "==[ Phase 6 / step 2 ]== Registering agent runner MCP server in user-scope mcp.json..." -ForegroundColor Cyan
@@ -141,6 +174,10 @@ if ($NoAgentMcp) {
         throw "forgewire-fabric mcp install exited with code $LASTEXITCODE."
     }
     Write-Host "==[ Phase 6 / step 2 ]== Agent runner MCP registered." -ForegroundColor Green
+    Register-HostRole -Role "agent_runner" -Enabled $true -Status "registered" -Metadata @{
+        mcp_server = "forgewire-runner"
+        workspace_root = $WorkspaceRoot
+    }
 }
 
 Write-Host ""

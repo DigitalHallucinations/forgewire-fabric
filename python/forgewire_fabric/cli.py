@@ -9,6 +9,7 @@ Subcommands:
 * ``forgewire-fabric tasks show``    — show a single task.
 * ``forgewire-fabric tasks stream``  — tail a task's stream output.
 * ``forgewire-fabric runners list``  — list registered runners.
+* ``forgewire-fabric hosts list``    — list host role summaries.
 * ``forgewire-fabric keys init``     — generate a dispatcher ed25519 keypair.
 * ``forgewire-fabric token gen``     — generate a random hub token (32 hex chars).
 
@@ -1424,6 +1425,63 @@ def runners_names() -> None:
                 }
             )
         _print_json({"hub_name": payload.get("hub_name", ""), "runners": rows})
+
+    _async(_go())
+
+
+# ---------------------------------------------------------------------------
+# hosts
+# ---------------------------------------------------------------------------
+
+
+@cli.group("hosts", help="Inspect host-level role summaries.")
+def hosts_group() -> None:
+    pass
+
+
+@hosts_group.command("list", help="List hosts with hub/control/dispatch/runner roles.")
+def hosts_list() -> None:
+    async def _go() -> None:
+        async with _client() as c:
+            _print_json(await c.list_hosts())
+
+    _async(_go())
+
+
+@hosts_group.command("set-role", help="Report or override a host role enablement fact.")
+@click.argument("hostname")
+@click.argument(
+    "role",
+    type=click.Choice(["hub_head", "control", "dispatch", "command_runner", "agent_runner"]),
+)
+@click.option("--enabled/--disabled", default=True, show_default=True)
+@click.option("--status", default=None, help="Freeform status, e.g. installed, registered, skipped.")
+@click.option(
+    "--metadata",
+    default="{}",
+    help="JSON metadata object to store with the role fact.",
+)
+def hosts_set_role(hostname: str, role: str, enabled: bool, status: str | None, metadata: str) -> None:
+    try:
+        metadata_obj = json.loads(metadata)
+    except json.JSONDecodeError as exc:
+        raise click.ClickException(f"metadata must be JSON: {exc}") from exc
+    if not isinstance(metadata_obj, dict):
+        raise click.ClickException("metadata must be a JSON object")
+
+    async def _go() -> None:
+        async with _client() as c:
+            _print_json(
+                await c.set_host_role(
+                    {
+                        "hostname": hostname,
+                        "role": role,
+                        "enabled": enabled,
+                        "status": status,
+                        "metadata": metadata_obj,
+                    }
+                )
+            )
 
     _async(_go())
 

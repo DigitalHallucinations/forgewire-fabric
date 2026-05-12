@@ -35,6 +35,7 @@ import json
 import logging
 import os
 import secrets
+import socket
 import sqlite3
 import sys
 import time
@@ -93,7 +94,7 @@ MIN_COMPATIBLE_PROTOCOL_VERSION = 2
 # instead of probing ``PRAGMA table_info``. Bumps are strictly additive.
 #
 # v3: adds ``tasks.kind`` (taxonomy: 'agent' vs 'command').
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Heartbeat / state machine thresholds.
 HEARTBEAT_DEGRADED_SECONDS = 45
@@ -480,6 +481,25 @@ class Blackboard:
             """
         )
 
+        # Phase 6+: host role installation facts. Runners and dispatchers
+        # prove liveness by heartbeat/registration, but agent-runner
+        # availability can be "installed but sleeping" because it lives in
+        # an interactive VS Code MCP session. The installer records those
+        # enablement facts here so /hosts can render host capability rows.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS host_roles (
+                hostname    TEXT NOT NULL,
+                role        TEXT NOT NULL,
+                enabled     INTEGER NOT NULL DEFAULT 1,
+                status      TEXT,
+                metadata    TEXT NOT NULL DEFAULT '{}',
+                updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (hostname, role)
+            )
+            """
+        )
+
         # M2.5.1: human-approval queue for REQUIRE_APPROVAL dispatch
         # decisions. The gate computes a stable envelope_hash over the
         # policy-relevant fields (sorted scope_globs, target branch, task
@@ -601,6 +621,54 @@ class Blackboard:
             conn.commit()
         if not self._suppress_snapshot_writeback:
             self._write_labels_snapshot()
+
+    # -------------------------------------------------------------- host roles
+
+    def set_host_role(
+        self,
+        *,
+        hostname: str,
+        role: str,
+        enabled: bool,
+        status: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        hostname = _normalize_hostname(hostname)
+        now = _now_iso()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO host_roles (hostname, role, enabled, status, metadata, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(hostname, role) DO UPDATE SET
+                    enabled    = excluded.enabled,
+                    status     = excluded.status,
+                    metadata   = excluded.metadata,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    hostname,
+                    role,
+                    1 if enabled else 0,
+                    status,
+                    json.dumps(metadata or {}),
+                    now,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM host_roles WHERE hostname = ? AND role = ?",
+                (hostname, role),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"{hostname}:{role}")
+        return _host_role_row_to_dict(row)
+
+    def list_host_roles(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM host_roles ORDER BY hostname, role"
+            ).fetchall()
+        return [_host_role_row_to_dict(row) for row in rows]
 
     # ----- labels snapshot sidecar (filesystem mirror) ----------------
 
@@ -2278,6 +2346,21 @@ def _runner_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return record
 
 
+def _host_role_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    record = dict(row)
+    record["enabled"] = bool(record.get("enabled"))
+    try:
+        record["metadata"] = json.loads(record.get("metadata") or "{}")
+    except (TypeError, ValueError):
+        record["metadata"] = {}
+    return record
+
+
+def _normalize_hostname(hostname: str | None) -> str:
+    value = (hostname or "").strip()
+    return value or "(unknown)"
+
+
 def _runner_kind_from_tags(tags: list[str] | None) -> str:
     """Derive a runner's task-kind affinity from its advertised tags.
 
@@ -2293,6 +2376,143 @@ def _runner_kind_from_tags(tags: list[str] | None) -> str:
         if norm == "kind:command":
             return "command"
     return "agent"
+
+
+HOST_ROLE_NAMES = (
+    "hub_head",
+    "control",
+    "dispatch",
+    "command_runner",
+    "agent_runner",
+)
+
+
+def _role_summary(
+    *,
+    enabled: bool,
+    status: str,
+    source: str,
+    updated_at: str | None = None,
+    address: str | None = None,
+    runner_ids: list[str] | None = None,
+    dispatcher_ids: list[str] | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "enabled": enabled,
+        "status": status,
+        "source": source,
+        "updated_at": updated_at,
+        "runner_ids": runner_ids or [],
+        "dispatcher_ids": dispatcher_ids or [],
+        "metadata": metadata or {},
+    }
+    if address:
+        out["address"] = address
+    return out
+
+
+def _runner_rollup_status(runners: list[dict[str, Any]]) -> str:
+    if not runners:
+        return "registered"
+    states = {str(r.get("state") or "unknown") for r in runners}
+    for state in ("online", "draining", "degraded", "offline"):
+        if state in states:
+            return state
+    return sorted(states)[0] if states else "unknown"
+
+
+def _build_host_summaries(
+    *,
+    runners: list[dict[str, Any]],
+    dispatchers: list[dict[str, Any]],
+    host_roles: list[dict[str, Any]],
+    active_hub_hostname: str,
+    active_hub_address: str,
+) -> list[dict[str, Any]]:
+    active_hub_hostname = _normalize_hostname(active_hub_hostname)
+    hostnames: set[str] = {active_hub_hostname}
+    runners_by_host: dict[str, list[dict[str, Any]]] = {}
+    dispatchers_by_host: dict[str, list[dict[str, Any]]] = {}
+    role_rows_by_host: dict[str, dict[str, dict[str, Any]]] = {}
+
+    for runner in runners:
+        hostname = _normalize_hostname(runner.get("hostname"))
+        hostnames.add(hostname)
+        runners_by_host.setdefault(hostname, []).append(runner)
+    for dispatcher in dispatchers:
+        hostname = _normalize_hostname(dispatcher.get("hostname"))
+        dispatchers_by_host.setdefault(hostname, []).append(dispatcher)
+    for role in host_roles:
+        hostname = _normalize_hostname(role.get("hostname"))
+        hostnames.add(hostname)
+        role_rows_by_host.setdefault(hostname, {})[str(role.get("role"))] = role
+
+    hosts: list[dict[str, Any]] = []
+    for hostname in sorted(hostnames, key=str.lower):
+        host_runners = runners_by_host.get(hostname, [])
+        host_dispatchers = dispatchers_by_host.get(hostname, [])
+        stored = role_rows_by_host.get(hostname, {})
+        roles: dict[str, dict[str, Any]] = {}
+
+        is_active_hub = hostname.lower() == active_hub_hostname.lower()
+        roles["hub_head"] = _role_summary(
+            enabled=is_active_hub,
+            status="active" if is_active_hub else "standby",
+            source="active_hub",
+            address=active_hub_address if is_active_hub else None,
+        )
+        roles["control"] = _role_summary(
+            enabled=is_active_hub,
+            status="master" if is_active_hub else "slave",
+            source="active_hub",
+        )
+
+        dispatch_role = stored.get("dispatch")
+        dispatcher_ids = [str(d.get("dispatcher_id")) for d in host_dispatchers]
+        roles["dispatch"] = _role_summary(
+            enabled=bool(host_dispatchers) or bool(dispatch_role and dispatch_role.get("enabled")),
+            status=(
+                "registered"
+                if host_dispatchers
+                else str((dispatch_role or {}).get("status") or "disabled")
+            ),
+            source="dispatcher_registry" if host_dispatchers else ("host_roles" if dispatch_role else "derived"),
+            updated_at=(dispatch_role or {}).get("updated_at"),
+            dispatcher_ids=dispatcher_ids,
+            metadata=(dispatch_role or {}).get("metadata") or {},
+        )
+
+        for role_name, runner_kind in (
+            ("command_runner", "command"),
+            ("agent_runner", "agent"),
+        ):
+            role_row = stored.get(role_name)
+            role_runners = [
+                r for r in host_runners if _runner_kind_from_tags(r.get("tags") or []) == runner_kind
+            ]
+            enabled = bool(role_runners) or bool(role_row and role_row.get("enabled"))
+            status = _runner_rollup_status(role_runners) if role_runners else str((role_row or {}).get("status") or "disabled")
+            source = "runner_heartbeat" if role_runners else ("host_roles" if role_row else "derived")
+            roles[role_name] = _role_summary(
+                enabled=enabled,
+                status=status,
+                source=source,
+                updated_at=(role_row or {}).get("updated_at"),
+                runner_ids=[str(r.get("runner_id")) for r in role_runners],
+                metadata=(role_row or {}).get("metadata") or {},
+            )
+
+        hosts.append(
+            {
+                "hostname": hostname,
+                "is_active_hub": is_active_hub,
+                "roles": roles,
+                "runners": host_runners,
+                "dispatchers": host_dispatchers,
+            }
+        )
+    return hosts
 
 
 def _glob_static_prefix(glob: str) -> str:
@@ -2552,6 +2772,20 @@ class RegisterDispatcherRequest(BaseModel):
     timestamp: int
     nonce: str = Field(..., min_length=8, max_length=80)
     signature: str
+
+
+class HostRoleRequest(BaseModel):
+    hostname: str = Field(..., min_length=1, max_length=200)
+    role: Literal[
+        "hub_head",
+        "control",
+        "dispatch",
+        "command_runner",
+        "agent_runner",
+    ]
+    enabled: bool = True
+    status: str | None = Field(default=None, max_length=80)
+    metadata: dict[str, Any] | None = None
 
 
 class DispatchTaskSignedRequest(DispatchTaskRequest):
@@ -3371,6 +3605,43 @@ def create_app(config: BlackboardConfig) -> FastAPI:
         if not deleted:
             raise HTTPException(status_code=404, detail="secret not found")
         return {"deleted": True, "name": name}
+
+    # ----- Phase 6+: host role summary ------------------------------------
+
+    @app.post("/hosts/roles", dependencies=[Depends(require_auth)])
+    def set_host_role(payload: HostRoleRequest) -> dict[str, Any]:
+        return {
+            "role": blackboard.set_host_role(
+                hostname=payload.hostname,
+                role=payload.role,
+                enabled=payload.enabled,
+                status=payload.status,
+                metadata=payload.metadata or {},
+            )
+        }
+
+    @app.get("/hosts", dependencies=[Depends(require_auth)])
+    def list_hosts(request: Request) -> dict[str, Any]:
+        labels = blackboard.get_labels()
+        runners = blackboard.list_runners()
+        aliases = labels.get("runner_aliases") or {}
+        for runner in runners:
+            runner["alias"] = aliases.get(runner.get("runner_id"), "")
+        active_address = str(request.base_url).rstrip("/")
+        hosts = _build_host_summaries(
+            runners=runners,
+            dispatchers=blackboard.list_dispatchers(),
+            host_roles=blackboard.list_host_roles(),
+            active_hub_hostname=socket.gethostname(),
+            active_hub_address=active_address,
+        )
+        return {
+            "hub_protocol_version": PROTOCOL_VERSION,
+            "hub_name": labels.get("hub_name", ""),
+            "active_hub_hostname": socket.gethostname(),
+            "active_hub_address": active_address,
+            "hosts": hosts,
+        }
 
     # ----- M2.4: dispatcher registry / signed dispatch ---------------------
 

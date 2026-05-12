@@ -87,6 +87,27 @@ export interface ClusterHealth {
   };
 }
 
+export type HostRoleName = "hub_head" | "control" | "dispatch" | "command_runner" | "agent_runner";
+
+export interface HostRoleSummary {
+  enabled: boolean;
+  status: string;
+  source: string;
+  updated_at?: string | null;
+  address?: string;
+  runner_ids: string[];
+  dispatcher_ids: string[];
+  metadata: Record<string, unknown>;
+}
+
+export interface HostSummary {
+  hostname: string;
+  is_active_hub: boolean;
+  roles: Record<HostRoleName, HostRoleSummary>;
+  runners: RunnerInfo[];
+  dispatchers: DispatcherInfo[];
+}
+
 export interface LabelsInfo {
   hub_name: string;
   runner_aliases: Record<string, string>;
@@ -307,6 +328,11 @@ export class HubClient {
 
   async clusterHealth(): Promise<ClusterHealth> {
     return this.request<ClusterHealth>("GET", "/cluster/health");
+  }
+
+  async listHosts(): Promise<HostSummary[]> {
+    const j = await this.request<{ hosts: HostSummary[] }>("GET", "/hosts");
+    return j.hosts ?? [];
   }
 
   async listTasks(limit = 50, status?: string): Promise<TaskInfo[]> {

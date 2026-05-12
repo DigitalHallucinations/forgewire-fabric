@@ -6,6 +6,9 @@ import {
   ClusterHealth,
   DispatcherInfo,
   HubClient,
+  HostRoleName,
+  HostRoleSummary,
+  HostSummary,
   RunnerInfo,
   SecretInfo,
   TaskInfo,
@@ -714,20 +717,18 @@ function formatUptime(seconds: number | undefined): string {
 }
 
 // ---------------------------------------------------------------------------
-// Hosts (cluster-typed taxonomy: Loom + Fabric, with cluster health)
+// Hosts (primary operational surface)
 //
-// A "host" is a physical/virtual machine identified by hostname that may
-// be running one or more roles (hub, runner, dispatcher). The Hosts view
-// groups by cluster type ("Fabric" = rqlite-backed forgewire-fabric;
-// "Loom" = reserved for the second backend that's not yet wired) and lets
-// the operator see at a glance which boxes are participating and which
-// roles each is running.
+// A "host" is the physical/virtual machine. The hub now fuses runners,
+// dispatchers, active hub-head identity, control role, and installer-reported
+// role enablement into /hosts, so this pane is the operator view. Raw runner
+// rows remain diagnostic data under each host role rather than a separate pane.
 // ---------------------------------------------------------------------------
 
 export type HostsNode =
   | { kind: "cluster"; cluster: "fabric" | "loom"; label: string; backend: string | null }
-  | { kind: "host"; cluster: "fabric" | "loom"; hostname: string; roles: string[]; runners: RunnerInfo[]; dispatchers: DispatcherInfo[] }
-  | { kind: "role"; hostname: string; role: string; description: string; tooltip?: string; icon: string }
+  | { kind: "host"; cluster: "fabric" | "loom"; host: HostSummary }
+  | { kind: "role"; hostname: string; roleName: HostRoleName; role: HostRoleSummary; runner?: RunnerInfo; dispatcher?: DispatcherInfo }
   | { kind: "health"; key: string; label: string; description: string; icon: string; tooltip?: string; color?: string }
   | { kind: "placeholder"; label: string; description?: string; icon: string };
 
@@ -735,7 +736,7 @@ export class HostsProvider implements vscode.TreeDataProvider<HostsNode> {
   private readonly _onDidChange = new vscode.EventEmitter<HostsNode | undefined | void>();
   readonly onDidChangeTreeData = this._onDidChange.event;
 
-  private fabricHosts: Map<string, { runners: RunnerInfo[]; dispatchers: DispatcherInfo[] }> = new Map();
+  private hosts: HostSummary[] = [];
   private health: ClusterHealth | undefined;
 
   constructor(private readonly client: () => HubClient | undefined) {}
@@ -772,34 +773,23 @@ export class HostsProvider implements vscode.TreeDataProvider<HostsNode> {
       }
       const nodes: HostsNode[] = [];
       try {
-        const [runners, dispatchers, health] = await Promise.all([
-          c.listRunners().catch(() => [] as RunnerInfo[]),
-          c.listDispatchers().catch(() => [] as DispatcherInfo[]),
+        const [hosts, health] = await Promise.all([
+          c.listHosts().catch(() => [] as HostSummary[]),
           c.clusterHealth().catch(() => undefined as ClusterHealth | undefined),
         ]);
         this.health = health;
-        this.fabricHosts = aggregateHosts(runners, dispatchers);
+        this.hosts = hosts;
         // Cluster Health sub-section first (always visible).
         nodes.push(...healthNodes(health));
         // Then one node per discovered host.
-        for (const [hostname, agg] of this.fabricHosts) {
-          const roles: string[] = [];
-          if (agg.runners.length) roles.push(`runner${agg.runners.length > 1 ? `\u00d7${agg.runners.length}` : ""}`);
-          if (agg.dispatchers.length) roles.push(`dispatcher${agg.dispatchers.length > 1 ? `\u00d7${agg.dispatchers.length}` : ""}`);
-          nodes.push({
-            kind: "host",
-            cluster: "fabric",
-            hostname,
-            roles,
-            runners: agg.runners,
-            dispatchers: agg.dispatchers,
-          });
+        for (const host of this.hosts) {
+          nodes.push({ kind: "host", cluster: "fabric", host });
         }
-        if (this.fabricHosts.size === 0) {
+        if (this.hosts.length === 0) {
           nodes.push({
             kind: "placeholder",
             label: "No hosts registered",
-            description: "no runners or dispatchers have reported in",
+            description: "no role facts, runners, or dispatchers reported in",
             icon: "inbox",
           });
         }
@@ -814,28 +804,14 @@ export class HostsProvider implements vscode.TreeDataProvider<HostsNode> {
       return nodes;
     }
     if (element.kind === "host") {
-      const out: HostsNode[] = [];
-      for (const r of element.runners) {
-        out.push({
-          kind: "role",
-          hostname: element.hostname,
-          role: "runner",
-          description: `${r.state} \u00b7 ${r.runner_id.slice(0, 8)}`,
-          icon: "server",
-          tooltip: `Runner ${r.runner_id}`,
-        });
-      }
-      for (const d of element.dispatchers) {
-        out.push({
-          kind: "role",
-          hostname: element.hostname,
-          role: "dispatcher",
-          description: `${d.label} \u00b7 ${d.dispatcher_id.slice(0, 8)}`,
-          icon: "rocket",
-          tooltip: `Dispatcher ${d.dispatcher_id} (last seen ${d.last_seen ?? "?"})`,
-        });
-      }
-      return out;
+      const host = element.host;
+      const order: HostRoleName[] = ["hub_head", "control", "dispatch", "command_runner", "agent_runner"];
+      return order.map((roleName) => {
+        const role = host.roles[roleName];
+        const runner = firstRoleRunner(host, roleName, role);
+        const dispatcher = firstRoleDispatcher(host, roleName, role);
+        return { kind: "role" as const, hostname: host.hostname, roleName, role, runner, dispatcher };
+      });
     }
     return [];
   }
@@ -855,25 +831,27 @@ export class HostsProvider implements vscode.TreeDataProvider<HostsNode> {
       return item;
     }
     if (n.kind === "host") {
-      const item = new vscode.TreeItem(n.hostname, vscode.TreeItemCollapsibleState.Collapsed);
-      item.id = `hosts:host:${n.cluster}:${n.hostname}`;
-      const isLocal = n.hostname.toLowerCase() === os.hostname().toLowerCase();
-      item.description = n.roles.join(" + ") + (isLocal ? " \u00b7 this host" : "");
+      const host = n.host;
+      const item = new vscode.TreeItem(host.hostname, vscode.TreeItemCollapsibleState.Collapsed);
+      item.id = `hosts:host:${n.cluster}:${host.hostname}`;
+      const isLocal = host.hostname.toLowerCase() === os.hostname().toLowerCase();
+      item.description = hostDescription(host) + (isLocal ? " \u00b7 this host" : "");
       item.iconPath = new vscode.ThemeIcon(
         "device-desktop",
-        isLocal ? new vscode.ThemeColor("charts.blue") : undefined
+        host.is_active_hub ? new vscode.ThemeColor("charts.green") : isLocal ? new vscode.ThemeColor("charts.blue") : undefined
       );
       item.contextValue = `hosts.host.${n.cluster}`;
-      item.tooltip = `${n.hostname} \u2014 ${n.runners.length} runner(s), ${n.dispatchers.length} dispatcher(s)`;
+      item.tooltip = hostTooltip(host);
       return item;
     }
     if (n.kind === "role") {
-      const item = new vscode.TreeItem(n.role, vscode.TreeItemCollapsibleState.None);
-      item.id = `hosts:role:${n.hostname}:${n.role}:${n.description}`;
-      item.description = n.description;
-      item.iconPath = new vscode.ThemeIcon(n.icon);
-      item.contextValue = `hosts.role.${n.role}`;
-      if (n.tooltip) item.tooltip = n.tooltip;
+      const item = new vscode.TreeItem(roleLabel(n.roleName), vscode.TreeItemCollapsibleState.None);
+      item.id = `hosts:role:${n.hostname}:${n.roleName}`;
+      item.description = roleDescription(n.roleName, n.role);
+      item.iconPath = new vscode.ThemeIcon(roleIcon(n.roleName), roleColor(n.roleName, n.role));
+      const isLocal = n.hostname.toLowerCase() === os.hostname().toLowerCase();
+      item.contextValue = n.runner ? runnerContext(n.runner, isLocal) : `hosts.role.${n.roleName}.${n.role.enabled ? "enabled" : "disabled"}`;
+      item.tooltip = roleTooltip(n.roleName, n.role);
       return item;
     }
     if (n.kind === "health") {
@@ -895,28 +873,102 @@ export class HostsProvider implements vscode.TreeDataProvider<HostsNode> {
   }
 }
 
-function aggregateHosts(
-  runners: RunnerInfo[],
-  dispatchers: DispatcherInfo[]
-): Map<string, { runners: RunnerInfo[]; dispatchers: DispatcherInfo[] }> {
-  const map = new Map<string, { runners: RunnerInfo[]; dispatchers: DispatcherInfo[] }>();
-  const get = (h: string) => {
-    let agg = map.get(h);
-    if (!agg) {
-      agg = { runners: [], dispatchers: [] };
-      map.set(h, agg);
+function firstRoleRunner(host: HostSummary, roleName: HostRoleName, role: HostRoleSummary): RunnerInfo | undefined {
+  if (roleName !== "command_runner" && roleName !== "agent_runner") return undefined;
+  const id = role.runner_ids[0];
+  return host.runners.find((r) => r.runner_id === id);
+}
+
+function firstRoleDispatcher(host: HostSummary, roleName: HostRoleName, role: HostRoleSummary): DispatcherInfo | undefined {
+  if (roleName !== "dispatch") return undefined;
+  const id = role.dispatcher_ids[0];
+  return host.dispatchers.find((d) => d.dispatcher_id === id);
+}
+
+function hostDescription(host: HostSummary): string {
+  const r = host.roles;
+  const pieces = [
+    `hub:${r.hub_head.status}`,
+    `ctrl:${r.control.status}`,
+    `cmd:${r.command_runner.status}`,
+    `agent:${r.agent_runner.status}`,
+    `dispatch:${r.dispatch.status}`,
+  ];
+  return pieces.join(" + ");
+}
+
+function hostTooltip(host: HostSummary): vscode.MarkdownString {
+  return new vscode.MarkdownString(
+    `**${host.hostname}**\n\n` +
+      `- hub head: \`${host.roles.hub_head.status}\`\n` +
+      `- control: \`${host.roles.control.status}\`\n` +
+      `- dispatch: \`${host.roles.dispatch.status}\`\n` +
+      `- command runner: \`${host.roles.command_runner.status}\` (${host.roles.command_runner.runner_ids.length})\n` +
+      `- agent runner: \`${host.roles.agent_runner.status}\` (${host.roles.agent_runner.runner_ids.length})\n` +
+      `- raw runners: ${host.runners.length}\n` +
+      `- dispatchers: ${host.dispatchers.length}`
+  );
+}
+
+function roleLabel(roleName: HostRoleName): string {
+  switch (roleName) {
+    case "hub_head": return "Hub head";
+    case "control": return "Control node";
+    case "dispatch": return "Dispatch";
+    case "command_runner": return "Command runner";
+    case "agent_runner": return "Agent runner";
+  }
+}
+
+function roleDescription(roleName: HostRoleName, role: HostRoleSummary): string {
+  const count = roleName === "dispatch" ? role.dispatcher_ids.length : role.runner_ids.length;
+  const suffix = count > 0 ? ` \u00b7 ${count}` : "";
+  if (roleName === "hub_head" && role.address) return `${role.status} \u00b7 ${role.address}`;
+  if (!role.enabled && role.status === "disabled") return "disabled";
+  return `${role.enabled ? role.status : `disabled (${role.status})`}${suffix}`;
+}
+
+function roleIcon(roleName: HostRoleName): string {
+  switch (roleName) {
+    case "hub_head": return "broadcast";
+    case "control": return "shield";
+    case "dispatch": return "rocket";
+    case "command_runner": return "terminal";
+    case "agent_runner": return "hubot";
+  }
+}
+
+function roleColor(roleName: HostRoleName, role: HostRoleSummary): vscode.ThemeColor | undefined {
+  if (!role.enabled) return new vscode.ThemeColor("charts.foreground");
+  if (role.status === "active" || role.status === "master" || role.status === "online" || role.status === "registered") {
+    return new vscode.ThemeColor(roleName === "agent_runner" ? "charts.blue" : "charts.green");
+  }
+  if (role.status === "draining" || role.status === "standby" || role.status === "slave") return new vscode.ThemeColor("charts.yellow");
+  if (role.status === "degraded") return new vscode.ThemeColor("charts.orange");
+  if (role.status === "offline") return new vscode.ThemeColor("charts.red");
+  return undefined;
+}
+
+function roleTooltip(roleName: HostRoleName, role: HostRoleSummary): vscode.MarkdownString {
+  const lines = [
+    `**${roleLabel(roleName)}**`,
+    "",
+    `- enabled: ${role.enabled}`,
+    `- status: \`${role.status}\``,
+    `- source: \`${role.source}\``,
+  ];
+  if (role.address) lines.push(`- address: \`${role.address}\``);
+  if (role.updated_at) lines.push(`- updated: ${role.updated_at}`);
+  if (role.runner_ids.length) lines.push(`- runners: ${role.runner_ids.map((id) => `\`${id}\``).join(", ")}`);
+  if (role.dispatcher_ids.length) lines.push(`- dispatchers: ${role.dispatcher_ids.map((id) => `\`${id}\``).join(", ")}`);
+  const metadata = Object.entries(role.metadata ?? {});
+  if (metadata.length) {
+    lines.push("", "**metadata**");
+    for (const [key, value] of metadata) {
+      lines.push(`- ${key}: \`${typeof value === "string" ? value : JSON.stringify(value)}\``);
     }
-    return agg;
-  };
-  for (const r of runners) {
-    const h = (r.hostname || "(unknown)").trim() || "(unknown)";
-    get(h).runners.push(r);
   }
-  for (const d of dispatchers) {
-    const h = (d.hostname || "(unknown)").toString().trim() || "(unknown)";
-    get(h).dispatchers.push(d);
-  }
-  return map;
+  return new vscode.MarkdownString(lines.join("\n"));
 }
 
 function healthNodes(health: ClusterHealth | undefined): HostsNode[] {

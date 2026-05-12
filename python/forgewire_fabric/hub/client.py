@@ -174,6 +174,16 @@ class BlackboardClient:
         assert result is not None
         return result
 
+    async def list_hosts(self) -> dict[str, Any]:
+        result = await self._request("GET", "/hosts")
+        assert result is not None
+        return result
+
+    async def set_host_role(self, payload: dict[str, Any]) -> dict[str, Any]:
+        result = await self._request("POST", "/hosts/roles", json=payload)
+        assert result is not None
+        return result
+
     # -- labels (cosmetic, fabric-wide) ----------------------------------
     async def get_labels(self) -> dict[str, Any]:
         """Return the hub label payload: ``{hub_name, runner_aliases}``."""

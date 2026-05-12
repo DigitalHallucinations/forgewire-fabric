@@ -2,7 +2,7 @@
   "name": "forgewire-fabric",
   "displayName": "ForgeWire Fabric",
   "description": "Dispatch tasks to a ForgeWire Fabric compute mesh: signed envelopes, scope-bound capability tokens, live stream output. Run a hub or runner from inside VS Code on Windows, macOS, or Linux.",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "publisher": "DigitalHallucinations",
   "license": "Apache-2.0",
   "icon": "media/icon.png",
@@ -365,12 +365,6 @@
           "contextualTitle": "ForgeWire Fabric Hosts"
         },
         {
-          "id": "forgewireFabric.runners",
-          "name": "Runners",
-          "icon": "$(server)",
-          "contextualTitle": "ForgeWire Fabric Runners"
-        },
-        {
           "id": "forgewireFabric.dispatchers",
           "name": "Dispatchers",
           "icon": "$(rocket)",
@@ -420,11 +414,6 @@
         "when": "!forgewireFabric.connected"
       },
       {
-        "view": "forgewireFabric.runners",
-        "contents": "No hub connection.\n\n[Connect to Hub](command:forgewireFabric.connectHub)\n\n[Start a Hub Locally](command:forgewireFabric.startHubHere)\n\n[Install the CLI](command:forgewireFabric.installCli)\n\nFirst time? Read the [ForgeWire Fabric quickstart](https://github.com/DigitalHallucinations/forgewire-fabric/blob/main/docs/QUICKSTART.md).",
-        "when": "!forgewireFabric.connected"
-      },
-      {
         "view": "forgewireFabric.dispatchers",
         "contents": "No hub connection.\n\n[Connect to Hub](command:forgewireFabric.connectHub)",
         "when": "!forgewireFabric.connected"
@@ -459,7 +448,7 @@
       "view/title": [
         {
           "command": "forgewireFabric.refresh",
-          "when": "view == forgewireFabric.runners || view == forgewireFabric.tasks || view == forgewireFabric.hub || view == forgewireFabric.hosts || view == forgewireFabric.dispatchers || view == forgewireFabric.approvals || view == forgewireFabric.audit || view == forgewireFabric.secrets || view == forgewireFabric.labels",
+          "when": "view == forgewireFabric.tasks || view == forgewireFabric.hub || view == forgewireFabric.hosts || view == forgewireFabric.dispatchers || view == forgewireFabric.approvals || view == forgewireFabric.audit || view == forgewireFabric.secrets || view == forgewireFabric.labels",
           "group": "navigation@1"
         },
         {
@@ -474,7 +463,7 @@
         },
         {
           "command": "forgewireFabric.connectHub",
-          "when": "view == forgewireFabric.runners",
+          "when": "view == forgewireFabric.hosts",
           "group": "navigation@2"
         }
       ],
@@ -501,32 +490,32 @@
         },
         {
           "command": "forgewireFabric.renameRunner",
-          "when": "view == forgewireFabric.runners && viewItem =~ /^runner\\./",
+          "when": "view == forgewireFabric.hosts && viewItem =~ /^runner\\./",
           "group": "inline@1"
         },
         {
           "command": "forgewireFabric.pauseRunner",
-          "when": "view == forgewireFabric.runners && viewItem =~ /^runner\\.online\\./",
+          "when": "view == forgewireFabric.hosts && viewItem =~ /^runner\\.online\\./",
           "group": "inline@2"
         },
         {
           "command": "forgewireFabric.resumeRunner",
-          "when": "view == forgewireFabric.runners && viewItem =~ /^runner\\.draining\\./",
+          "when": "view == forgewireFabric.hosts && viewItem =~ /^runner\\.draining\\./",
           "group": "inline@2"
         },
         {
           "command": "forgewireFabric.restartRunnerService",
-          "when": "view == forgewireFabric.runners && viewItem =~ /^runner\\.[a-z]+\\.local$/",
+          "when": "view == forgewireFabric.hosts && viewItem =~ /^runner\\.[a-z]+\\.local$/",
           "group": "inline@3"
         },
         {
           "command": "forgewireFabric.stopRunnerService",
-          "when": "view == forgewireFabric.runners && viewItem =~ /^runner\\.[a-z]+\\.local$/",
+          "when": "view == forgewireFabric.hosts && viewItem =~ /^runner\\.[a-z]+\\.local$/",
           "group": "runner@2"
         },
         {
           "command": "forgewireFabric.startRunnerService",
-          "when": "view == forgewireFabric.runners && viewItem =~ /^runner\\.offline\\.local$/",
+          "when": "view == forgewireFabric.hosts && viewItem =~ /^runner\\.offline\\.local$/",
           "group": "runner@1"
         },
         {

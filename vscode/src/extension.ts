@@ -18,7 +18,6 @@ import {
   HostsProvider,
   HubProvider,
   LabelsProvider,
-  RunnersProvider,
   SecretsProvider,
   TasksProvider,
 } from "./treeProviders";
@@ -29,7 +28,6 @@ let outputChannel: vscode.OutputChannel;
 let statusItem: vscode.StatusBarItem;
 let hubProvider: HubProvider;
 let hostsProvider: HostsProvider;
-let runnersProvider: RunnersProvider;
 let dispatchersProvider: DispatchersProvider;
 let approvalsProvider: ApprovalsProvider;
 let auditProvider: AuditProvider;
@@ -62,7 +60,6 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<void> {
 
   hubProvider = new HubProvider(getClient, getProbe);
   hostsProvider = new HostsProvider(getClient);
-  runnersProvider = new RunnersProvider(getClient);
   dispatchersProvider = new DispatchersProvider(getClient);
   approvalsProvider = new ApprovalsProvider(getClient);
   auditProvider = new AuditProvider(getClient);
@@ -72,7 +69,6 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<void> {
   ctx.subscriptions.push(
     vscode.window.registerTreeDataProvider("forgewireFabric.hub", hubProvider),
     vscode.window.registerTreeDataProvider("forgewireFabric.hosts", hostsProvider),
-    vscode.window.registerTreeDataProvider("forgewireFabric.runners", runnersProvider),
     vscode.window.registerTreeDataProvider("forgewireFabric.dispatchers", dispatchersProvider),
     vscode.window.registerTreeDataProvider("forgewireFabric.approvals", approvalsProvider),
     vscode.window.registerTreeDataProvider("forgewireFabric.audit", auditProvider),
@@ -205,7 +201,6 @@ async function probeAndRefresh(): Promise<void> {
   }
   updateStatus();
   hubProvider?.refresh();
-  runnersProvider?.refresh();
   tasksProvider?.refresh();
   hostsProvider?.refresh();
   dispatchersProvider?.refresh();
@@ -808,6 +803,9 @@ function extractRunnerArg(arg: unknown): RunnerArg | undefined {
   const a = arg as Record<string, unknown>;
   // Tree node may wrap the runner under .runner.
   if (a.kind === "runner" && a.runner && typeof a.runner === "object") {
+    return a.runner as RunnerArg;
+  }
+  if (a.runner && typeof a.runner === "object") {
     return a.runner as RunnerArg;
   }
   return a as RunnerArg;
