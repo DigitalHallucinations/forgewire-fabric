@@ -53,30 +53,72 @@ ForgeWire
 | `forgewire` CLI (Click) | ✅ `hub`, `runner`, `dispatch`, `tasks`, `runners`, `keys`, `token`. |
 | `tests/` | ✅ End-to-end + parity tests. |
 | VS Code extension | ✅ Cross-OS GUI in [`vscode/`](vscode). Connect, dispatch, tail streams, start a hub or runner with one command. |
-| NSSM/systemd/launchd installers | 📋 Planned (M2.3). |
+| NSSM installer (Windows) | ✅ `forgewire-fabric setup` ships NSSM services, runner watchdog, and cross-host hub watchdog OOTB. |
+| systemd / launchd installers | 📋 Planned. |
+
+---
+
+## 🛡️ Resilience: every node guards the cluster
+
+> **Reboot, kernel panic, asyncio loop death, or a wedged hub host — the fabric heals itself without a human.** Every node installed with `forgewire-fabric setup` ships with two scheduled-task watchdogs running under `SYSTEM`:
+>
+> - **Runner watchdog** — probes the hub's view of *this* host. If our `last_heartbeat` is stale > 120s for 3 minutes (the asyncio-loop-death case NSSM cannot detect), it restarts the local runner service.
+> - **Hub watchdog** — probes the hub's `/healthz`. On the hub host, restarts locally. On every *peer* host, restarts the hub **over SSH** using a `SYSTEM`-owned key with `BatchMode=yes`. **The hub host can die and any peer will bring it back.**
+>
+> No extra steps. No second installer. No "production hardening" phase. The OOTB chain is drift-guarded by tests (`tests/test_installer_assets_in_sync.py`) so future changes cannot silently break it.
+
+Validate any node with:
+
+```powershell
+Get-ScheduledTaskInfo -TaskName ForgeWireRunnerWatchdog, ForgeWireHubWatchdog |
+  Select-Object TaskName, LastRunTime, LastTaskResult   # LastTaskResult must be 0
+```
+
+Full operator detail: [`docs/RESILIENCE.md`](docs/RESILIENCE.md) (when present) and `scripts/install/install-*-watchdog.ps1`.
 
 ---
 
 ## Quickstart
 
-```bash
+The recommended path on Windows installs NSSM services **and** the
+self-healing watchdog stack (see [Resilience](#️-resilience-every-node-guards-the-cluster))
+in a single command per host.
+
+```powershell
 pip install forgewire-fabric
 
-# Hub host
-forgewire token gen > hub.token
-export FORGEWIRE_HUB_TOKEN=$(cat hub.token)
-forgewire-fabric hub start --host 0.0.0.0 --port 8765
+# 1. Hub host — also gets a local hub watchdog automatically.
+forgewire-fabric setup --role hub-and-runner `
+  --port 8765 --bind-host 0.0.0.0
 
-# Each runner
-export FORGEWIRE_HUB_URL=http://<hub>:8765 FORGEWIRE_HUB_TOKEN=...
-forgewire-fabric runner start --workspace-root /path/to/repo \
-    --scope-prefixes "src/,tests/" --tags "linux,python:3.11"
+# 2. Each peer runner — add the SSH triplet so this node can restart
+#    the hub if the hub host dies. Cross-host failover is OOTB.
+forgewire-fabric setup --role runner `
+  --hub-url http://<hub>:8765 `
+  --workspace-root C:\path\to\repo `
+  --hub-ssh-host <hub-host-or-ip> `
+  --hub-ssh-user <user-on-hub> `
+  --hub-ssh-key-file C:\Users\<you>\.ssh\id_ed25519_forgewire
 
-# Dispatch from any machine with the token
-forgewire-fabric dispatch "pytest -x" --scope "tests/**" \
-    --branch agent/laptop/smoke --base-commit $(git rev-parse origin/main)
+# 3. Dispatch from any machine with the token.
+forgewire-fabric dispatch "pytest -x" --scope "tests/**" `
+  --branch agent/laptop/smoke --base-commit (git rev-parse origin/main)
 forgewire-fabric tasks list
 forgewire-fabric tasks stream <id>
+```
+
+Pass `--no-hub-watchdog` on a runner if a node should not participate
+in hub failover. On `--role hub-and-runner` the cross-host watchdog is
+auto-suppressed (the local hub watchdog already covers it).
+
+A minimal Linux/macOS path (no service supervisor yet) still works:
+
+```bash
+pip install forgewire-fabric
+forgewire token gen > hub.token
+export FORGEWIRE_HUB_TOKEN=$(cat hub.token)
+forgewire-fabric hub start --host 0.0.0.0 --port 8765   # hub host
+forgewire-fabric runner start --workspace-root /path/to/repo  # each runner
 ```
 
 Full guide: [`docs/QUICKSTART.md`](docs/QUICKSTART.md).
