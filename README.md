@@ -9,7 +9,7 @@ ForgeWire - Fabric lets VS Code, automation systems, and orchestration layers se
 
 ForgeWire began with a simple problem: one developer machine was not enough. The original goal was to let a Copilot-driven VS Code workflow on one machine dispatch work in parallel to another trusted machine, without turning the process into a pile of SSH sessions, loose scripts, and blind trust.
 
-Early versions reused a few pieces from [ForgeWire](https://github.com/DigitalHallucinations/forgewire), then the project evolved through iteration, crossed into the PhrenForge ecosystem, and was extracted back into a standalone project once the remote-dispatch fabric became useful on its own.
+Early versions reused a few pieces from [ForgeWire](https://github.com/DigitalHallucinations/forgewire), then the project evolved through iteration, crossed into the ForgeWire ecosystem, and was extracted back into a standalone project once the remote-dispatch fabric became useful on its own.
 
 ## What ForgeWire is (and isn't)
 
