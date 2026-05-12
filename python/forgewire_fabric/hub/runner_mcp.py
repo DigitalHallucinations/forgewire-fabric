@@ -348,6 +348,8 @@ async def _register_with_retries(session: RunnerSession) -> dict[str, Any]:
 async def _heartbeat_loop(session: RunnerSession) -> None:
     while True:
         await asyncio.sleep(HEARTBEAT_INTERVAL_SECONDS)
+        if session.last_register_response is None:
+            continue
         try:
             await session.client.heartbeat(
                 session.runner_id, session.heartbeat_payload()
@@ -603,6 +605,8 @@ def _register_tools(registry: ToolRegistry, session: RunnerSession) -> None:
             "runner_version": session.runner_version,
             "protocol_version": PROTOCOL_VERSION,
             "max_concurrent": session.max_concurrent,
+            "registered": session.last_register_response is not None,
+            "last_register_response": session.last_register_response,
             "last_resources": session.last_resources,
             "last_heartbeat_ok": session.last_heartbeat_ok,
         }
@@ -624,7 +628,7 @@ async def _run() -> None:
         session.runner_id,
         session.host["hostname"],
     )
-    await _register_with_retries(session)
+    registration_task = asyncio.create_task(_register_with_retries(session))
     heartbeat_task = asyncio.create_task(_heartbeat_loop(session))
     server = Server("forgewire-runner")
     registry = ToolRegistry()
@@ -641,11 +645,9 @@ async def _run() -> None:
         LOGGER.error("blackboard error: %s", exc)
         raise
     finally:
+        registration_task.cancel()
         heartbeat_task.cancel()
-        try:
-            await heartbeat_task
-        except asyncio.CancelledError:
-            pass
+        await asyncio.gather(registration_task, heartbeat_task, return_exceptions=True)
         await client.aclose()
 
 

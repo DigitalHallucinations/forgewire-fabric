@@ -1064,8 +1064,9 @@ def _write_vscode_user_mcp(
     ``mcp.json`` so any window picks them up without per-workspace config.
 
     * ``forgewire-dispatcher`` always wired -- every box might drive.
-    * ``forgewire-runner`` only wired when this host installs a runner; it
-      points at the local hub (127.0.0.1) since they are colocated.
+        * ``forgewire-runner`` only wired when this host installs a runner; it
+            uses the same hub URL passed to setup/install so non-hub workstations
+            do not hang trying to register against localhost.
 
     Stale entries from the legacy ``forgewire`` repo (``BLACKBOARD_*`` env,
     ``scripts.remote.hub.*`` modules) are pruned so the OptiPlex stops
@@ -1113,7 +1114,7 @@ def _write_vscode_user_mcp(
 
     if install_runner:
         runner_env = {
-            "FORGEWIRE_HUB_URL": "http://127.0.0.1:8765",
+            "FORGEWIRE_HUB_URL": hub_url,
             "FORGEWIRE_HUB_TOKEN_FILE": str(user_token),
         }
         if workspace_root:

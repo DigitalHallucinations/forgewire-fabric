@@ -728,7 +728,9 @@ function formatUptime(seconds: number | undefined): string {
 export type HostsNode =
   | { kind: "cluster"; cluster: "fabric" | "loom"; label: string; backend: string | null }
   | { kind: "host"; cluster: "fabric" | "loom"; host: HostSummary }
-  | { kind: "role"; hostname: string; roleName: HostRoleName; role: HostRoleSummary; runner?: RunnerInfo; dispatcher?: DispatcherInfo }
+  | { kind: "role"; hostname: string; roleName: HostRoleName; role: HostRoleSummary; runner?: RunnerInfo; dispatchers?: DispatcherInfo[] }
+  | { kind: "dispatcher"; hostname: string; dispatcher: DispatcherInfo }
+  | { kind: "dispatcherProp"; dispatcher: DispatcherInfo; key: string; label: string; description: string; icon: string }
   | { kind: "health"; key: string; label: string; description: string; icon: string; tooltip?: string; color?: string }
   | { kind: "placeholder"; label: string; description?: string; icon: string };
 
@@ -809,9 +811,38 @@ export class HostsProvider implements vscode.TreeDataProvider<HostsNode> {
       return order.map((roleName) => {
         const role = host.roles[roleName];
         const runner = firstRoleRunner(host, roleName, role);
-        const dispatcher = firstRoleDispatcher(host, roleName, role);
-        return { kind: "role" as const, hostname: host.hostname, roleName, role, runner, dispatcher };
+        const dispatchers = roleName === "dispatch"
+          ? host.dispatchers.filter((d) => role.dispatcher_ids.includes(d.dispatcher_id))
+          : undefined;
+        return { kind: "role" as const, hostname: host.hostname, roleName, role, runner, dispatchers };
       });
+    }
+    if (element.kind === "role" && element.roleName === "dispatch") {
+      return (element.dispatchers ?? []).map((dispatcher) => ({
+        kind: "dispatcher" as const,
+        hostname: element.hostname,
+        dispatcher,
+      }));
+    }
+    if (element.kind === "dispatcher") {
+      const d = element.dispatcher;
+      const props: HostsNode[] = [
+        { kind: "dispatcherProp", dispatcher: d, key: "id", label: "Dispatcher ID", description: d.dispatcher_id, icon: "key" },
+        { kind: "dispatcherProp", dispatcher: d, key: "hostname", label: "Hostname", description: d.hostname ?? "?", icon: "device-desktop" },
+        { kind: "dispatcherProp", dispatcher: d, key: "last_seen", label: "Last seen", description: d.last_seen ?? "?", icon: "history" },
+        { kind: "dispatcherProp", dispatcher: d, key: "first_seen", label: "First seen", description: d.first_seen ?? "?", icon: "calendar" },
+      ];
+      for (const [key, value] of Object.entries(d.metadata ?? {})) {
+        props.push({
+          kind: "dispatcherProp",
+          dispatcher: d,
+          key: `meta.${key}`,
+          label: key,
+          description: typeof value === "string" ? value : JSON.stringify(value),
+          icon: "info",
+        });
+      }
+      return props;
     }
     return [];
   }
@@ -845,13 +876,34 @@ export class HostsProvider implements vscode.TreeDataProvider<HostsNode> {
       return item;
     }
     if (n.kind === "role") {
-      const item = new vscode.TreeItem(roleLabel(n.roleName), vscode.TreeItemCollapsibleState.None);
+      const collapsible = n.roleName === "dispatch" && (n.dispatchers?.length ?? 0) > 0
+        ? vscode.TreeItemCollapsibleState.Collapsed
+        : vscode.TreeItemCollapsibleState.None;
+      const item = new vscode.TreeItem(roleLabel(n.roleName), collapsible);
       item.id = `hosts:role:${n.hostname}:${n.roleName}`;
       item.description = roleDescription(n.roleName, n.role);
       item.iconPath = new vscode.ThemeIcon(roleIcon(n.roleName), roleColor(n.roleName, n.role));
       const isLocal = n.hostname.toLowerCase() === os.hostname().toLowerCase();
       item.contextValue = n.runner ? runnerContext(n.runner, isLocal) : `hosts.role.${n.roleName}.${n.role.enabled ? "enabled" : "disabled"}`;
       item.tooltip = roleTooltip(n.roleName, n.role);
+      return item;
+    }
+    if (n.kind === "dispatcher") {
+      const d = n.dispatcher;
+      const item = new vscode.TreeItem(d.label || d.dispatcher_id.slice(0, 8), vscode.TreeItemCollapsibleState.Collapsed);
+      item.id = `hosts:dispatcher:${n.hostname}:${d.dispatcher_id}`;
+      item.description = d.last_seen ? `last seen ${d.last_seen}` : d.hostname ?? "";
+      item.iconPath = new vscode.ThemeIcon("rocket", new vscode.ThemeColor("charts.green"));
+      item.contextValue = "hosts.dispatcher";
+      item.tooltip = `dispatcher_id: ${d.dispatcher_id}\nhost: ${d.hostname ?? "?"}\nlast_seen: ${d.last_seen ?? "?"}`;
+      return item;
+    }
+    if (n.kind === "dispatcherProp") {
+      const item = new vscode.TreeItem(n.label, vscode.TreeItemCollapsibleState.None);
+      item.id = `hosts:dispatcher:${n.dispatcher.dispatcher_id}:${n.key}`;
+      item.description = n.description;
+      item.iconPath = new vscode.ThemeIcon(n.icon);
+      item.contextValue = `hosts.dispatcherProp.${n.key}`;
       return item;
     }
     if (n.kind === "health") {
@@ -877,12 +929,6 @@ function firstRoleRunner(host: HostSummary, roleName: HostRoleName, role: HostRo
   if (roleName !== "command_runner" && roleName !== "agent_runner") return undefined;
   const id = role.runner_ids[0];
   return host.runners.find((r) => r.runner_id === id);
-}
-
-function firstRoleDispatcher(host: HostSummary, roleName: HostRoleName, role: HostRoleSummary): DispatcherInfo | undefined {
-  if (roleName !== "dispatch") return undefined;
-  const id = role.dispatcher_ids[0];
-  return host.dispatchers.find((d) => d.dispatcher_id === id);
 }
 
 function hostDescription(host: HostSummary): string {

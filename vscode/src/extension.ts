@@ -14,7 +14,6 @@ import { HubClient } from "./hubClient";
 import {
   ApprovalsProvider,
   AuditProvider,
-  DispatchersProvider,
   HostsProvider,
   HubProvider,
   LabelsProvider,
@@ -28,7 +27,6 @@ let outputChannel: vscode.OutputChannel;
 let statusItem: vscode.StatusBarItem;
 let hubProvider: HubProvider;
 let hostsProvider: HostsProvider;
-let dispatchersProvider: DispatchersProvider;
 let approvalsProvider: ApprovalsProvider;
 let auditProvider: AuditProvider;
 let secretsProvider: SecretsProvider;
@@ -60,7 +58,6 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<void> {
 
   hubProvider = new HubProvider(getClient, getProbe);
   hostsProvider = new HostsProvider(getClient);
-  dispatchersProvider = new DispatchersProvider(getClient);
   approvalsProvider = new ApprovalsProvider(getClient);
   auditProvider = new AuditProvider(getClient);
   secretsProvider = new SecretsProvider(getClient);
@@ -69,7 +66,6 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<void> {
   ctx.subscriptions.push(
     vscode.window.registerTreeDataProvider("forgewireFabric.hub", hubProvider),
     vscode.window.registerTreeDataProvider("forgewireFabric.hosts", hostsProvider),
-    vscode.window.registerTreeDataProvider("forgewireFabric.dispatchers", dispatchersProvider),
     vscode.window.registerTreeDataProvider("forgewireFabric.approvals", approvalsProvider),
     vscode.window.registerTreeDataProvider("forgewireFabric.audit", auditProvider),
     vscode.window.registerTreeDataProvider("forgewireFabric.secrets", secretsProvider),
@@ -203,7 +199,6 @@ async function probeAndRefresh(): Promise<void> {
   hubProvider?.refresh();
   tasksProvider?.refresh();
   hostsProvider?.refresh();
-  dispatchersProvider?.refresh();
   approvalsProvider?.refresh();
   auditProvider?.refresh();
   secretsProvider?.refresh();
