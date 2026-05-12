@@ -104,6 +104,34 @@ def test_hub_watchdog_supports_remote_ssh_restart() -> None:
         )
 
 
+def test_hub_installer_defaults_rqlite_consistency_to_strong() -> None:
+    """The NSSM hub installer MUST default ``-RqliteConsistency`` to
+    ``"strong"``. ``"weak"`` skips the Raft read-index, so a SELECT can
+    return state older than the last committed write across a leader
+    flip. This violates audit-chain integrity (``prev_hash`` reads
+    must be linearizable) and is binding under the thesis. Every other
+    defaulting layer in the tree (``Connection.__init__``,
+    ``BlackboardConfig``, the CLI ``--rqlite-consistency`` flag, and the
+    ``FORGEWIRE_HUB_RQLITE_CONSISTENCY`` env var) already defaults to
+    ``strong``; the installer was the lone outlier.
+    """
+    needle = (
+        '[ValidateSet("none","weak","strong","linearizable")]'
+        '[string]$RqliteConsistency = "strong"'
+    )
+    for asset in (
+        SOURCE_DIR / "nssm-install-hub.ps1",
+        BUNDLED_DIR / "nssm-install-hub.ps1",
+    ):
+        body = asset.read_text(encoding="utf-8")
+        assert needle in body, (
+            f"{asset}: -RqliteConsistency default must be 'strong' for "
+            "audit-chain integrity. Do not weaken without a measured "
+            "latency justification."
+        )
+
+
+
 def test_watchdogs_use_system_reachable_pwsh_host() -> None:
     """Both watchdog scheduled tasks MUST resolve a SYSTEM-reachable
     PowerShell host at install time. Using bare 'pwsh.exe' picks up the
@@ -122,3 +150,4 @@ def test_watchdogs_use_system_reachable_pwsh_host() -> None:
             f"{name}: still using bare 'pwsh.exe' which SYSTEM cannot launch "
             "when pwsh comes from the Microsoft Store."
         )
+

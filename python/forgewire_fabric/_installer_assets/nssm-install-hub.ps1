@@ -29,7 +29,11 @@ param(
     [ValidateSet("sqlite","rqlite")][string]$Backend = "sqlite",
     [string]$RqliteHost = "",
     [int]$RqlitePort = 4001,
-    [ValidateSet("none","weak","strong","linearizable")][string]$RqliteConsistency = "weak",
+    # rqlite read consistency for hub SELECTs. "strong" issues a Raft
+    # round-trip per read; required for audit-chain integrity
+    # (prev_hash reads must not be stale across leader flips). Do not
+    # weaken without a measured latency justification.
+    [ValidateSet("none","weak","strong","linearizable")][string]$RqliteConsistency = "strong",
     [switch]$NoWatchdog
 )
 
