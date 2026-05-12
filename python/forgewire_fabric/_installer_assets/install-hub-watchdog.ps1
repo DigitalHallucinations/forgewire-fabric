@@ -50,7 +50,17 @@ param(
     [int]   $TimeoutSeconds  = 5,
     [string]$LogPath         = "C:\ProgramData\forgewire\logs\hub-watchdog.log",
     [string]$StateFile       = "C:\ProgramData\forgewire\hub-watchdog.state",
-    [string]$TaskName        = "ForgeWireHubWatchdog"
+    [string]$TaskName        = "ForgeWireHubWatchdog",
+    # ---- Cross-host failover (option B) ---------------------------------
+    # When set, the probe restarts the hub via OpenSSH instead of
+    # Restart-Service locally. All four params must be supplied together.
+    # The HealthzUrl should target the remote hub (not 127.0.0.1).
+    # The key file must be readable by SYSTEM (the scheduled task account).
+    [string]$SshHost           = "",
+    [string]$SshUser           = "",
+    [string]$SshKeyFile        = "",
+    [string]$RemoteServiceName = "",
+    [string]$KnownHostsFile    = "C:\ProgramData\forgewire\ssh\known_hosts"
 )
 
 $ErrorActionPreference = "Stop"
@@ -83,7 +93,12 @@ param(
     [Parameter(Mandatory)][int]$FailureThreshold,
     [Parameter(Mandatory)][int]$TimeoutSeconds,
     [Parameter(Mandatory)][string]$LogPath,
-    [Parameter(Mandatory)][string]$StateFile
+    [Parameter(Mandatory)][string]$StateFile,
+    [Parameter()][string]$SshHost           = "",
+    [Parameter()][string]$SshUser           = "",
+    [Parameter()][string]$SshKeyFile        = "",
+    [Parameter()][string]$RemoteServiceName = "",
+    [Parameter()][string]$KnownHostsFile    = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -121,8 +136,57 @@ Set-Content -Path $StateFile -Value "$count" -Encoding ASCII -NoNewline
 Write-Log "fail" @{ code = $code; error = $err; consecutive_failures = $count }
 
 if ($count -ge $FailureThreshold) {
-    Write-Log "restart" @{ service = $ServiceName; consecutive_failures = $count }
+    Write-Log "restart" @{ service = $ServiceName; consecutive_failures = $count; remote = [bool]$SshHost }
     $restarted = $false
+
+    # --- Cross-host failover via OpenSSH --------------------------------
+    if ($SshHost -and $SshUser -and $SshKeyFile -and $RemoteServiceName) {
+        $sshExe = $null
+        foreach ($cand in @(
+                (Get-Command ssh.exe -ErrorAction SilentlyContinue).Source,
+                "$env:SystemRoot\System32\OpenSSH\ssh.exe",
+                "$env:ProgramFiles\OpenSSH\ssh.exe"
+            )) {
+            if ($cand -and (Test-Path $cand)) { $sshExe = $cand; break }
+        }
+        if (-not $sshExe) {
+            Write-Log "restart_error" @{ error = "ssh.exe not found"; method = "ssh" }
+        } elseif (-not (Test-Path $SshKeyFile)) {
+            Write-Log "restart_error" @{ error = "SshKeyFile not found: $SshKeyFile"; method = "ssh" }
+        } else {
+            $remoteCmd = "powershell -NoProfile -Command `"Restart-Service $RemoteServiceName -Force`""
+            $sshArgs = @(
+                "-i", $SshKeyFile,
+                "-o", "BatchMode=yes",
+                "-o", "StrictHostKeyChecking=accept-new",
+                "-o", "ConnectTimeout=10"
+            )
+            if ($KnownHostsFile) {
+                $khDir = Split-Path $KnownHostsFile
+                if ($khDir -and -not (Test-Path $khDir)) { New-Item -ItemType Directory -Force -Path $khDir | Out-Null }
+                $sshArgs += @("-o", "UserKnownHostsFile=$KnownHostsFile")
+            }
+            $sshArgs += @("$SshUser@$SshHost", $remoteCmd)
+            try {
+                $sshOut = & $sshExe @sshArgs 2>&1 | Out-String
+                $sshOut.Trim().Split([Environment]::NewLine) | ForEach-Object {
+                    if ($_) { Add-Content -Path $LogPath -Value ("# ssh: " + $_) -Encoding utf8 }
+                }
+                if ($LASTEXITCODE -eq 0) {
+                    $restarted = $true
+                    Write-Log "restart_via" @{ method = "ssh"; target = "$SshUser@$SshHost"; service = $RemoteServiceName }
+                } else {
+                    Write-Log "restart_error" @{ method = "ssh"; exit_code = $LASTEXITCODE }
+                }
+            } catch {
+                Write-Log "restart_error" @{ method = "ssh"; error = $_.Exception.Message }
+            }
+        }
+        if ($restarted) { Set-Content -Path $StateFile -Value "0" -Encoding ASCII -NoNewline }
+        return
+    }
+
+    # --- Local restart (NSSM preferred, Restart-Service fallback) -------
     # Try nssm first (preserves rotation/log config), falling back to the
     # built-in Restart-Service which is always available under SYSTEM PATH.
     $nssm = $null
@@ -168,7 +232,18 @@ if ($count -ge $FailureThreshold) {
 
 Set-Content -Path $ProbeScript -Value $probeBody -Encoding utf8
 
-$probeArgs = @(
+# Validate cross-host failover params (all-or-nothing).
+$remote = [bool]($SshHost -or $SshUser -or $SshKeyFile -or $RemoteServiceName)
+if ($remote) {
+    foreach ($pair in @(@('SshHost',$SshHost), @('SshUser',$SshUser), @('SshKeyFile',$SshKeyFile), @('RemoteServiceName',$RemoteServiceName))) {
+        if (-not $pair[1]) { throw "Cross-host failover requires all of -SshHost/-SshUser/-SshKeyFile/-RemoteServiceName. Missing: $($pair[0])." }
+    }
+    if (-not (Test-Path $SshKeyFile)) {
+        throw "SshKeyFile not found at $SshKeyFile. Place the SYSTEM-readable private key there before installing the watchdog."
+    }
+}
+
+$argList = @(
     "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $ProbeScript,
     "-ServiceName",      $ServiceName,
     "-HealthzUrl",       $HealthzUrl,
@@ -176,9 +251,33 @@ $probeArgs = @(
     "-TimeoutSeconds",   $TimeoutSeconds,
     "-LogPath",          $LogPath,
     "-StateFile",        $StateFile
-) -join " "
+)
+if ($remote) {
+    $argList += @(
+        "-SshHost",           $SshHost,
+        "-SshUser",           $SshUser,
+        "-SshKeyFile",        $SshKeyFile,
+        "-RemoteServiceName", $RemoteServiceName,
+        "-KnownHostsFile",    $KnownHostsFile
+    )
+}
+$probeArgs = $argList -join " "
 
-$action    = New-ScheduledTaskAction -Execute "pwsh.exe" -Argument $probeArgs
+# Resolve a PowerShell host that SYSTEM can launch. pwsh 7 from the
+# Microsoft Store ships under C:\Program Files\WindowsApps\... which is
+# NOT executable by SYSTEM scheduled tasks (ERROR_FILE_NOT_FOUND). Prefer
+# pwsh 7 only at its msi/zip install location; otherwise fall back to the
+# built-in Windows PowerShell 5.1 which is always present at a fixed path.
+$pwshCandidates = @(
+    "$env:ProgramFiles\PowerShell\7\pwsh.exe",
+    "$env:ProgramFiles(x86)\PowerShell\7\pwsh.exe",
+    "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+)
+$psHost = $null
+foreach ($c in $pwshCandidates) { if ($c -and (Test-Path $c)) { $psHost = $c; break } }
+if (-not $psHost) { throw "No SYSTEM-reachable PowerShell host found." }
+
+$action    = New-ScheduledTaskAction -Execute $psHost -Argument $probeArgs
 $trigger   = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
                 -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes)
 $principalT = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
@@ -195,6 +294,10 @@ Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
 
 Write-Host "Installed scheduled task '$TaskName'."
 Write-Host "  Probe:     $HealthzUrl every $IntervalMinutes min, threshold=$FailureThreshold, timeout=${TimeoutSeconds}s"
-Write-Host "  Service:   $ServiceName"
+if ($remote) {
+    Write-Host "  Restart:   remote via ssh $SshUser@$SshHost -i $SshKeyFile (service: $RemoteServiceName)"
+} else {
+    Write-Host "  Restart:   local service '$ServiceName'"
+}
 Write-Host "  Log:       $LogPath"
 Write-Host "  State:     $StateFile"

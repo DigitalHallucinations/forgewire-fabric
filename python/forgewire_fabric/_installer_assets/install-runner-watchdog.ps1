@@ -282,7 +282,21 @@ if ($RunnerHostname) {
 }
 $probeArgs = $argParts -join " "
 
-$action     = New-ScheduledTaskAction -Execute "pwsh.exe" -Argument $probeArgs
+# Resolve a PowerShell host that SYSTEM can launch. pwsh 7 from the
+# Microsoft Store ships under C:\Program Files\WindowsApps\... which is
+# NOT executable by SYSTEM scheduled tasks (ERROR_FILE_NOT_FOUND). Prefer
+# pwsh 7 only at its msi/zip install location; otherwise fall back to the
+# built-in Windows PowerShell 5.1 which is always present at a fixed path.
+$pwshCandidates = @(
+    "$env:ProgramFiles\PowerShell\7\pwsh.exe",
+    "$env:ProgramFiles(x86)\PowerShell\7\pwsh.exe",
+    "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+)
+$psHost = $null
+foreach ($c in $pwshCandidates) { if ($c -and (Test-Path $c)) { $psHost = $c; break } }
+if (-not $psHost) { throw "No SYSTEM-reachable PowerShell host found." }
+
+$action     = New-ScheduledTaskAction -Execute $psHost -Argument $probeArgs
 $trigger    = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
                 -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes)
 $principalT = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
