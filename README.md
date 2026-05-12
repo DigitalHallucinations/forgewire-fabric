@@ -20,16 +20,16 @@ Early versions reused a few pieces from [ForgeWire](https://github.com/DigitalHa
 ### Inside PhrenForge vs. standalone
 
 ```text
-ForgeWire
-├─ Local dispatcher              ← stays in ForgeWire 
-├─ Blackboard / shared state    ← stays in PhrenForge
+ForgeWire - Fabric
+├─ Local dispatcher              ← stays in ForgeWire - Fabric
+├─ Blackboard / shared state    ← stays in ForgeWire
 ├─ Local tools, agents, workflows
 └─ ForgeWire bridge
    ├─ Remote machine dispatch
    ├─ Remote agent dispatch
    ├─ Signed dispatch envelopes
    ├─ Capability-scoped execution
-   └─ Event/result reporting back to PhrenForge blackboard
+   └─ Event/result reporting back to ForgeWire blackboard
 ```
 
 **Inside ForgeWire**, ForgeWire - Fabric is the remote execution bridge. ForgeWire keeps its own local dispatcher and blackboard; ForgeWire - Fabric handles authenticated dispatch to remote workers and returns telemetry and results into ForgeWire's coordination layer. ForgeWire - Fabric does not replace those systems.
@@ -202,7 +202,7 @@ ForgeWire - Fabric is **not currently** a full distributed compute runtime or cl
 
 However, ForgeWire - Fabric lays the **control-plane foundation** for heterogeneous private compute: a future layer where trusted machines can advertise capabilities, receive scoped work, execute in parallel, stream state, and report results back to an originating controller such as PhrenForge.
 
-### Today — remote dispatch fabric
+### Today — remote dispatch FABRIC
 
 - Send jobs to remote machines and agents
 - Authenticate dispatch (ed25519 + bearer token)
@@ -210,7 +210,7 @@ However, ForgeWire - Fabric lays the **control-plane foundation** for heterogene
 - Stream events / results over SSE
 - Report back to PhrenForge or another controller
 
-### Future — heterogeneous private compute fabric
+### Future — heterogeneous private compute LOOM
 
 - Runner capability registry (CPU / GPU / RAM / OS / arch / toolchain / network location / trust level)
 - Heartbeats and health scoring
@@ -224,7 +224,7 @@ However, ForgeWire - Fabric lays the **control-plane foundation** for heterogene
 - Optional PhrenForge blackboard reporting
 - Optional VS Code visualization of runner state
 
-Full plan: [DigitalHallucinations/PhrenForge → todos/114-forgewire-fabric](https://github.com/DigitalHallucinations/PhrenForge/tree/main/todos/114-forgewire-fabric).
+Full plan: [DigitalHallucinations/forgewire → todos/114-forgewire-fabric](https://github.com/DigitalHallucinations/forgewire/tree/main/todos/114-forgewire-fabric).
 
 ---
 
