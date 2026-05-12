@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Idempotently install BOTH ForgeWire runner flavors on this Windows host.
 
@@ -6,9 +6,9 @@
     Phase 6 / "both kinds always available" mandate. The fabric's task
     taxonomy splits work into two queues:
 
-      * kind:command — claimed by the shell-exec runner that ships as a
+      * kind:command -- claimed by the shell-exec runner that ships as a
         background Windows service (NSSM 'ForgeWireRunner').
-      * kind:agent   — claimed by the Copilot-Chat MCP runner that lives
+      * kind:agent   -- claimed by the Copilot-Chat MCP runner that lives
         inside an interactive VS Code window (chat mode 'forgewire-runner').
 
     Both are *binary* identities, not operator config: every host that
@@ -17,9 +17,9 @@
     OOTB by chaining:
 
       1. scripts/install/nssm-install-runner.ps1
-         — installs/updates the always-on command runner service.
+         -- installs/updates the always-on command runner service.
       2. `forgewire-fabric mcp install --with-runner`
-         — registers the agent runner MCP server in the user-scope
+         -- registers the agent runner MCP server in the user-scope
            VS Code mcp.json (forgewire-dispatcher + forgewire-runner).
 
     The agent runner is *not* a daemon by design. Copilot Chat is the
@@ -145,9 +145,9 @@ if ($NoAgentMcp) {
 
 Write-Host ""
 Write-Host "Both runner kinds are now available on this host:" -ForegroundColor Green
-Write-Host "  * kind:command — Windows service '$ServiceName' (auto-start)."
+Write-Host "  * kind:command -- Windows service '$ServiceName' (auto-start)."
 if (-not $NoAgentMcp) {
-    Write-Host "  * kind:agent   — VS Code MCP server 'forgewire-runner'."
+    Write-Host "  * kind:agent   -- VS Code MCP server 'forgewire-runner'."
     Write-Host "                   Wake with scripts\wake_runner.ps1 or open the"
     Write-Host "                   'forgewire-runner' chat mode in VS Code."
 }
