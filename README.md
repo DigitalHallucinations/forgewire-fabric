@@ -17,7 +17,7 @@ Early versions reused a few pieces from [ForgeWire](https://github.com/DigitalHa
 
 **ForgeWire - Fabric is not** — yet — a full distributed compute runtime, work-graph scheduler, or cluster manager. It is not a drop-in replacement for Ray, Nomad, Kubernetes, Slurm, or Dask. It does not split a single job across nodes, manage GPU residency, or do heterogeneous bin-packing. Those capabilities are on the [roadmap](#roadmap-heterogeneous-private-compute) but the project is honest that today it is the *control plane*, not the compute layer.
 
-### Inside PhrenForge vs. standalone
+### Inside ForgeWire vs. ForgeWire - Fabric (standalone)
 
 ```text
 ForgeWire - Fabric
