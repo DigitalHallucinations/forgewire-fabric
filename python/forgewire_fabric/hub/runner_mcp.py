@@ -56,10 +56,12 @@ from forgewire_fabric.hub.client import (
 from forgewire_fabric.hub.mcp_common import ToolRegistry
 from forgewire_fabric.runner.identity import RunnerIdentity, load_or_create
 from forgewire_fabric.runner.runner_capabilities import (
+    apply_kind_tag,
     describe_host,
     detect_tools,
     fresh_nonce,
     now_ts,
+    resolve_kind_env,
     sample_resources,
     sign_payload,
 )
@@ -294,6 +296,11 @@ def _build_session(client: BlackboardClient) -> RunnerSession:
     tags = _parse_csv(
         os.environ.get("FORGEWIRE_RUNNER_TAGS")
         or os.environ.get("PHRENFORGE_RUNNER_TAGS")
+    )
+    tags = apply_kind_tag(
+        tags,
+        default_kind="agent",
+        env_override=resolve_kind_env(),
     )
     scope_prefixes = _parse_csv(
         os.environ.get("FORGEWIRE_RUNNER_SCOPE_PREFIXES")

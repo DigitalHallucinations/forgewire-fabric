@@ -24,6 +24,88 @@ from typing import Any
 from forgewire_fabric.runner.identity import RunnerIdentity
 
 
+# Allowed values for the runner's task-kind affinity. Mirrors the hub's
+# ``DispatchTaskRequest.kind`` enum. Anything else is rejected at startup
+# so a typo in a service env var is loud instead of silently routing the
+# wrong work.
+_VALID_KINDS = ("agent", "command")
+_KIND_ENV_VARS = ("FORGEWIRE_RUNNER_KIND", "PHRENFORGE_RUNNER_KIND")
+
+
+def apply_kind_tag(
+    tags: list[str],
+    *,
+    default_kind: str,
+    env_override: str | None = None,
+) -> list[str]:
+    """Return ``tags`` with exactly one ``kind:<value>`` entry present.
+
+    Resolution order:
+
+    1. ``env_override`` (typically ``FORGEWIRE_RUNNER_KIND``) wins. If set
+       and valid, any existing ``kind:*`` tag is replaced.
+    2. Otherwise, if ``tags`` already contains a ``kind:*`` (or
+       ``kind=*``) entry, it is normalised and kept.
+    3. Otherwise, ``kind:<default_kind>`` is appended.
+
+    Raises :class:`ValueError` when the resolved kind is not one of
+    :data:`_VALID_KINDS` -- a misconfigured shell-exec runner must
+    refuse to start rather than fall back to ``agent`` and claim work
+    it cannot safely execute.
+    """
+    if default_kind not in _VALID_KINDS:
+        raise ValueError(f"invalid default_kind: {default_kind!r}")
+
+    def _norm(raw: str) -> str:
+        return raw.strip().lower().replace("=", ":")
+
+    chosen: str | None = None
+    if env_override is not None:
+        candidate = env_override.strip().lower()
+        if candidate:
+            if candidate not in _VALID_KINDS:
+                raise ValueError(
+                    f"FORGEWIRE_RUNNER_KIND={env_override!r}: "
+                    f"must be one of {_VALID_KINDS}"
+                )
+            chosen = candidate
+
+    rebuilt: list[str] = []
+    existing_kind: str | None = None
+    for raw in tags or []:
+        if not isinstance(raw, str):
+            continue
+        norm = _norm(raw)
+        if norm.startswith("kind:"):
+            value = norm.split(":", 1)[1].strip()
+            if value in _VALID_KINDS and existing_kind is None:
+                existing_kind = value
+            # In all cases we drop the original so we can re-append a
+            # single canonical entry at the end.
+            continue
+        rebuilt.append(raw)
+
+    if chosen is None:
+        chosen = existing_kind or default_kind
+
+    if chosen not in _VALID_KINDS:
+        raise ValueError(
+            f"resolved runner kind {chosen!r} is not in {_VALID_KINDS}"
+        )
+
+    rebuilt.append(f"kind:{chosen}")
+    return rebuilt
+
+
+def resolve_kind_env() -> str | None:
+    """Read the runner-kind env var (canonical name + legacy alias)."""
+    for name in _KIND_ENV_VARS:
+        val = os.environ.get(name)
+        if val is not None:
+            return val
+    return None
+
+
 # ---------------------------------------------------------------------- info
 
 

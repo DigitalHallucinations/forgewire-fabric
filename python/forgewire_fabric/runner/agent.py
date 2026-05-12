@@ -43,11 +43,13 @@ from forgewire_fabric.runner.identity import (
     load_runner_config_overrides,
 )
 from forgewire_fabric.runner.runner_capabilities import (
+    apply_kind_tag,
     describe_capabilities,
     describe_host,
     detect_tools,
     fresh_nonce,
     now_ts,
+    resolve_kind_env,
     sample_resources,
     sign_payload,
 )
@@ -143,8 +145,12 @@ class RunnerConfig:
         return cls(
             workspace_root=workspace_root,
             tenant=_env_or_sidecar("FORGEWIRE_RUNNER_TENANT", "tenant") or None,
-            tags=_parse_csv(
-                _env_or_sidecar("FORGEWIRE_RUNNER_TAGS", "tags")
+            tags=apply_kind_tag(
+                _parse_csv(
+                    _env_or_sidecar("FORGEWIRE_RUNNER_TAGS", "tags")
+                ),
+                default_kind="command",
+                env_override=resolve_kind_env(),
             ),
             scope_prefixes=_parse_csv(
                 _env_or_sidecar(
