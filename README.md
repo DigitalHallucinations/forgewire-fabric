@@ -1,27 +1,27 @@
-# ForgeWire
+# ForgeWire - Fabric
 
 > **Bring-your-own-compute for AI-assisted development.**  
 > A secure remote dispatch fabric for AI agents, developer machines, and trusted runners. Apache-2.0.
 
-ForgeWire lets VS Code, automation systems, and orchestration layers send scoped work to **machines you already control** using signed dispatch envelopes, capability-bound execution, structured event streams, and auditable results. It turns VS Code into a control surface for a private developer compute fabric — without renting someone else's cloud and without a tangle of SSH sessions and loose scripts.
+ForgeWire - Fabric lets VS Code, automation systems, and orchestration layers send scoped work to **machines you already control** using signed dispatch envelopes, capability-bound execution, structured event streams, and auditable results. It turns VS Code into a control surface for a private developer compute fabric — without renting someone else's cloud and without a tangle of SSH sessions and loose scripts.
 
 ## Origin
 
 ForgeWire began with a simple problem: one developer machine was not enough. The original goal was to let a Copilot-driven VS Code workflow on one machine dispatch work in parallel to another trusted machine, without turning the process into a pile of SSH sessions, loose scripts, and blind trust.
 
-Early versions reused a few pieces from [PhrenForge](https://github.com/DigitalHallucinations/PhrenForge), then the project evolved through iteration, crossed into the PhrenForge ecosystem, and was extracted back into a standalone project once the remote-dispatch fabric became useful on its own.
+Early versions reused a few pieces from [ForgeWire](https://github.com/DigitalHallucinations/forgewire), then the project evolved through iteration, crossed into the PhrenForge ecosystem, and was extracted back into a standalone project once the remote-dispatch fabric became useful on its own.
 
 ## What ForgeWire is (and isn't)
 
-**ForgeWire is** a *remote machine and agent dispatch fabric*. It authenticates dispatchers, advertises runner capabilities, ships scoped work over a signed wire, streams events back, and persists results. It is useful as a standalone tool and as a bridge from larger systems (like PhrenForge) to remote workers.
+**ForgeWire - Fabric is** a *remote machine and agent dispatch fabric*. It authenticates dispatchers, advertises runner capabilities, ships scoped work over a signed wire, streams events back, and persists results. It is useful as a standalone tool and as a bridge from larger systems (like PhrenForge) to remote workers.
 
-**ForgeWire is not** — yet — a full distributed compute runtime, work-graph scheduler, or cluster manager. It is not a drop-in replacement for Ray, Nomad, Kubernetes, Slurm, or Dask. It does not split a single job across nodes, manage GPU residency, or do heterogeneous bin-packing. Those capabilities are on the [roadmap](#roadmap-heterogeneous-private-compute) but the project is honest that today it is the *control plane*, not the compute layer.
+**ForgeWire - Fabric is not** — yet — a full distributed compute runtime, work-graph scheduler, or cluster manager. It is not a drop-in replacement for Ray, Nomad, Kubernetes, Slurm, or Dask. It does not split a single job across nodes, manage GPU residency, or do heterogeneous bin-packing. Those capabilities are on the [roadmap](#roadmap-heterogeneous-private-compute) but the project is honest that today it is the *control plane*, not the compute layer.
 
 ### Inside PhrenForge vs. standalone
 
 ```text
-PhrenForge
-├─ Local dispatcher              ← stays in PhrenForge
+ForgeWire
+├─ Local dispatcher              ← stays in ForgeWire 
 ├─ Blackboard / shared state    ← stays in PhrenForge
 ├─ Local tools, agents, workflows
 └─ ForgeWire bridge
@@ -32,15 +32,15 @@ PhrenForge
    └─ Event/result reporting back to PhrenForge blackboard
 ```
 
-**Inside PhrenForge**, ForgeWire is the remote execution bridge. PhrenForge keeps its own local dispatcher and blackboard; ForgeWire handles authenticated dispatch to remote workers and returns telemetry and results into PhrenForge's coordination layer. ForgeWire does not replace those systems.
+**Inside ForgeWire**, ForgeWire - Fabric is the remote execution bridge. ForgeWire keeps its own local dispatcher and blackboard; ForgeWire - Fabric handles authenticated dispatch to remote workers and returns telemetry and results into ForgeWire's coordination layer. ForgeWire - Fabric does not replace those systems.
 
-**Standalone**, ForgeWire lets developers wire up trusted machines they already own as remote execution targets for VS Code/Copilot-style workflows: one development machine dispatches scoped work to another in parallel, and the editor watches the stream live.
+**Standalone**, ForgeWire - Fabric lets developers wire up trusted machines they already own as remote execution targets for VS Code/Copilot-style workflows: one development machine dispatches scoped work to another in parallel, and the editor watches the stream live.
 
 ---
 
 ## Status
 
-✅ **M2.1 shipped — pip-installable.** End-to-end smoke verified: hub + runner + dispatch from `pip install forgewire-fabric`. See [`docs/QUICKSTART.md`](docs/QUICKSTART.md) for the 5-minute path. Roadmap in [todo 114-forgewire-fabric](https://github.com/DigitalHallucinations/PhrenForge/tree/main/todos/114-forgewire-fabric).
+✅ **M2.1 shipped — pip-installable.** End-to-end smoke verified: hub + runner + dispatch from `pip install forgewire-fabric`. See [`docs/QUICKSTART.md`](docs/QUICKSTART.md) for the 5-minute path. Roadmap in [todo 114-forgewire-fabric](https://github.com/DigitalHallucinations/forgewire/tree/main/todos/114-forgewire-fabric).
 
 | Component | State |
 |-----------|-------|
@@ -88,7 +88,7 @@ from [`vscode/`](vscode):
 
 ```bash
 cd vscode && npm install && npm run package
-code --install-extension forgewire-0.1.0.vsix
+code --install-extension forgewire-fabric-0.1.0.vsix
 ```
 
 Then run **ForgeWire: Connect to Hub** from the command palette. The
@@ -101,7 +101,7 @@ without touching a terminal. See [`vscode/README.md`](vscode/README.md).
 ## Layout
 
 ```
-forgewire/
+ForgeWire - Fabric/
 ├── Cargo.toml                  # Rust workspace
 ├── crates/
 │   ├── fabric-protocol/            # Signed-envelope schema + ed25519 verify
