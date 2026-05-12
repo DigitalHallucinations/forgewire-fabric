@@ -31,7 +31,34 @@ from typing import Any
 
 import click
 
-from forgewire_fabric import __version__
+from forgewire_fabric import __version__, runtime_version
+
+
+def _version_triple() -> str:
+    """Render the full compatibility triple shown by ``--version``."""
+    # Local imports keep CLI startup snappy and avoid importing FastAPI just
+    # to read a constant.
+    from forgewire_fabric.hub.server import (
+        PROTOCOL_VERSION,
+        SCHEMA_VERSION,
+        DEFAULT_MIN_RUNNER_VERSION,
+    )
+
+    rt = runtime_version() or "(pure-python)"
+    return (
+        f"forgewire-fabric {__version__}\n"
+        f"  runtime    = {rt}\n"
+        f"  protocol   = {PROTOCOL_VERSION}\n"
+        f"  schema     = {SCHEMA_VERSION}\n"
+        f"  min_runner = {DEFAULT_MIN_RUNNER_VERSION}"
+    )
+
+
+def _print_version(ctx: click.Context, _param: click.Parameter, value: bool) -> None:
+    if not value or ctx.resilient_parsing:
+        return
+    click.echo(_version_triple())
+    ctx.exit()
 
 
 # ---------------------------------------------------------------------------
@@ -59,7 +86,14 @@ def _async(coro: Any) -> Any:
 
 
 @click.group(help="ForgeWire control-plane CLI.")
-@click.version_option(__version__, prog_name="forgewire-fabric")
+@click.option(
+    "--version",
+    is_flag=True,
+    expose_value=False,
+    is_eager=True,
+    callback=_print_version,
+    help="Show fabric/runtime/protocol/schema/min_runner versions and exit.",
+)
 def cli() -> None:
     pass
 

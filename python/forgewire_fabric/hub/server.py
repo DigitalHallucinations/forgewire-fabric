@@ -87,6 +87,14 @@ DEFAULT_PORT = 8765
 PROTOCOL_VERSION = 3
 MIN_COMPATIBLE_PROTOCOL_VERSION = 2
 
+# Current on-disk schema version. Bumped whenever ``_migrate_v2_columns`` adds
+# or alters a column; the migration writes a matching row into
+# ``schema_version`` so future migrations can branch off ``MAX(version)``
+# instead of probing ``PRAGMA table_info``. Bumps are strictly additive.
+#
+# v3: adds ``tasks.kind`` (taxonomy: 'agent' vs 'command').
+SCHEMA_VERSION = 3
+
 # Heartbeat / state machine thresholds.
 HEARTBEAT_DEGRADED_SECONDS = 45
 HEARTBEAT_OFFLINE_SECONDS = 120
@@ -103,7 +111,13 @@ DEFAULT_MIN_BATTERY_PCT = 20
 
 # Minimum runner version the hub will accept. Override via
 # ``BLACKBOARD_MIN_RUNNER_VERSION`` env or ``--min-runner-version`` CLI flag.
-DEFAULT_MIN_RUNNER_VERSION = "0.0.0"
+#
+# Aligned with PROTOCOL_VERSION=3: ``0.4.0`` is the first runner release that
+# speaks the v3 wire (signed dispatch + capability routing). Anything older
+# would have to be paired with MIN_COMPATIBLE_PROTOCOL_VERSION=2 anyway, and
+# that legacy gate is being retired. Override in production deployments to
+# pin the fleet floor higher.
+DEFAULT_MIN_RUNNER_VERSION = "0.4.0"
 
 
 def _parse_version(value: str) -> tuple[int, int, int]:
@@ -403,6 +417,16 @@ class Blackboard:
         for col, decl in additions:
             if col not in existing:
                 conn.execute(f"ALTER TABLE tasks ADD COLUMN {col} {decl}")
+
+        # Record the on-disk schema version. schema.sql seeds rows 1 and 2;
+        # row 3 corresponds to the ``tasks.kind`` column added above. Future
+        # migrations should append a matching row here, never mutate or
+        # delete existing rows.
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_version (version, applied_at) "
+            "VALUES (?, datetime('now'))",
+            (SCHEMA_VERSION,),
+        )
 
         # v0.4: runner self-reported reliability counters. Surfaced on
         # /runners so a stuck claim loop is visible in the UI.
