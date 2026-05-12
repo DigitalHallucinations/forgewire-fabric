@@ -49,7 +49,6 @@ from forgewire_fabric.runner.runner_capabilities import (
     detect_tools,
     fresh_nonce,
     now_ts,
-    resolve_kind_env,
     sample_resources,
     sign_payload,
 )
@@ -150,7 +149,6 @@ class RunnerConfig:
                     _env_or_sidecar("FORGEWIRE_RUNNER_TAGS", "tags")
                 ),
                 default_kind="command",
-                env_override=resolve_kind_env(),
             ),
             scope_prefixes=_parse_csv(
                 _env_or_sidecar(

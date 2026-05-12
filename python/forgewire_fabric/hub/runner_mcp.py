@@ -61,7 +61,6 @@ from forgewire_fabric.runner.runner_capabilities import (
     detect_tools,
     fresh_nonce,
     now_ts,
-    resolve_kind_env,
     sample_resources,
     sign_payload,
 )
@@ -297,11 +296,7 @@ def _build_session(client: BlackboardClient) -> RunnerSession:
         os.environ.get("FORGEWIRE_RUNNER_TAGS")
         or os.environ.get("PHRENFORGE_RUNNER_TAGS")
     )
-    tags = apply_kind_tag(
-        tags,
-        default_kind="agent",
-        env_override=resolve_kind_env(),
-    )
+    tags = apply_kind_tag(tags, default_kind="agent")
     scope_prefixes = _parse_csv(
         os.environ.get("FORGEWIRE_RUNNER_SCOPE_PREFIXES")
         or os.environ.get("PHRENFORGE_RUNNER_SCOPE_PREFIXES")

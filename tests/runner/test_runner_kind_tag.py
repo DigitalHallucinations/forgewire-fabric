@@ -27,7 +27,6 @@ from forgewire_fabric.hub.server import BlackboardConfig, create_app
 from forgewire_fabric.runner.identity import load_or_create
 from forgewire_fabric.runner.runner_capabilities import (
     apply_kind_tag,
-    resolve_kind_env,
     sign_payload,
 )
 
@@ -46,53 +45,29 @@ def test_apply_kind_tag_appends_default_when_missing() -> None:
     ]
 
 
-def test_apply_kind_tag_preserves_existing_kind() -> None:
+def test_apply_kind_tag_overrides_operator_supplied_kind() -> None:
+    """The runner's kind is the binary, not the config: any operator-
+    supplied ``kind:*`` tag in the sidecar/env must be stripped and
+    replaced by the binary's hard default."""
     out = apply_kind_tag(["kind:agent", "rust"], default_kind="command")
-    # Canonicalised but kept.
-    assert out.count("kind:agent") == 1
-    assert "kind:command" not in out
-    assert "rust" in out
-
-
-def test_apply_kind_tag_normalises_equals_form() -> None:
-    out = apply_kind_tag(["KIND=Command"], default_kind="agent")
-    assert out == ["kind:command"]
-
-
-def test_apply_kind_tag_env_override_replaces_existing() -> None:
-    out = apply_kind_tag(
-        ["kind:agent", "gpu:cuda"],
-        default_kind="agent",
-        env_override="command",
-    )
     assert "kind:agent" not in out
-    assert "kind:command" in out
-    assert "gpu:cuda" in out
+    assert out == ["rust", "kind:command"]
 
 
-def test_apply_kind_tag_rejects_invalid_env_override() -> None:
+def test_apply_kind_tag_strips_equals_form_too() -> None:
+    out = apply_kind_tag(["KIND=Command", "gpu"], default_kind="agent")
+    assert out == ["gpu", "kind:agent"]
+
+
+def test_apply_kind_tag_rejects_invalid_default() -> None:
     with pytest.raises(ValueError):
-        apply_kind_tag([], default_kind="agent", env_override="banana")
+        apply_kind_tag([], default_kind="banana")
 
 
 def test_apply_kind_tag_idempotent() -> None:
     once = apply_kind_tag(["x"], default_kind="command")
     twice = apply_kind_tag(once, default_kind="command")
     assert once == twice
-
-
-def test_resolve_kind_env_reads_canonical_var(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("FORGEWIRE_RUNNER_KIND", "command")
-    monkeypatch.delenv("PHRENFORGE_RUNNER_KIND", raising=False)
-    assert resolve_kind_env() == "command"
-
-
-def test_resolve_kind_env_falls_back_to_legacy_alias(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("FORGEWIRE_RUNNER_KIND", raising=False)
-    monkeypatch.setenv("PHRENFORGE_RUNNER_KIND", "agent")
-    assert resolve_kind_env() == "agent"
 
 
 # ---------------------------------------------------------------- e2e routing
