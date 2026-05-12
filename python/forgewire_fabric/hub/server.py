@@ -287,6 +287,35 @@ class Blackboard:
         # ``_write_labels_snapshot`` -- pointless during restore and
         # could corrupt the sidecar mid-read on a buggy filesystem.
         self._suppress_snapshot_writeback = False
+        # Enterprise-deploy probe: warn loudly if the sidecar directory
+        # is not writable so the operator can fix ACLs *before* a wipe
+        # silently strands them with a stale snapshot. Best-effort: a
+        # missing directory is auto-created, EPERM/EACCES is logged at
+        # WARNING, and any other OSError is logged but never raised --
+        # the labels feature degrades to read-only-restore behaviour.
+        if self._labels_snapshot_path is not None:
+            self._probe_labels_snapshot_writable()
+
+    def _probe_labels_snapshot_writable(self) -> None:  # pragma: no cover - filesystem
+        path = self._labels_snapshot_path
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            probe = path.parent / f".labels.snapshot.probe-{os.getpid()}"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink()
+        except OSError as exc:
+            LOGGER.warning(
+                "labels snapshot directory %s is not writable (%s); "
+                "write-through will be a no-op and operator-set names "
+                "will not be auto-restored after a labels-table wipe. "
+                "Grant the hub service account write access to this "
+                "directory, or set FORGEWIRE_HUB_LABELS_SNAPSHOT to a "
+                "writable path.",
+                path.parent,
+                exc,
+            )
 
     # ------------------------------------------------------------------ infra
 
@@ -590,6 +619,28 @@ class Blackboard:
         if path is None:
             return {"status": "disabled", "path": None, "applied": 0}
         if not path.exists():
+            # Enterprise-deploy safety net: if the sidecar is missing
+            # but the DB already has operator-set labels, mirror the DB
+            # into a fresh sidecar so the *next* wipe is recoverable.
+            # This handles:
+            #   * the very first deploy of the snapshot feature onto a
+            #     hub that already has labels (no need for a manual
+            #     ``labels export`` + scp);
+            #   * a standby promoted via /state/import (DB labels come
+            #     across in the SQLite blob, sidecar does not);
+            #   * a reimaged host that restored only the DB from backup.
+            live = self.get_labels()
+            has_state = bool(
+                live.get("hub_name") or live.get("runner_aliases")
+            )
+            if has_state:
+                self._write_labels_snapshot()
+                return {
+                    "status": "seeded_from_db",
+                    "path": str(path),
+                    "applied": 0,
+                    "seeded_keys": 1 + len(live.get("runner_aliases") or {}),
+                }
             return {"status": "absent", "path": str(path), "applied": 0}
         try:
             data = json.loads(path.read_text(encoding="utf-8"))

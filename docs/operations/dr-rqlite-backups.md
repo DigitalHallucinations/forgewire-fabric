@@ -122,3 +122,49 @@ Get-ScheduledTaskInfo -TaskName ForgeWireRqliteBackup
 The `backup.log.jsonl` file contains one JSON record per attempt
 (per-voter warnings and a final summary record), suitable for
 shipping to any log aggregator.
+
+## Labels snapshot sidecar (operator names)
+
+The hub also maintains a JSON sidecar that mirrors the `labels`
+table (`hub_name` + `runner_alias:<runner_id>` rows). This sidecar
+is what survives an accidental table wipe, a DR restore from a
+snapshot that pre-dates a rename, or a fresh-host promotion. It is
+**not** redundant with the rqlite backups above; the SQLite blob
+backups capture the full DB at a point in time, while the sidecar
+captures only the operator-set names but is always current.
+
+- **Path**: `<db-path-dir>/labels.snapshot.json` by default. On a
+  default Windows install that is
+  `C:\ProgramData\forgewire\labels.snapshot.json`. Override with
+  `--labels-snapshot <path>` on `hub start` or
+  `FORGEWIRE_HUB_LABELS_SNAPSHOT`. Set to the empty string to
+  disable.
+- **Write semantics**: the hub mirrors every successful
+  `PUT /labels/*` to the sidecar atomically (`.tmp` + `os.replace`).
+  Filesystem errors are logged at WARNING and never block the DB
+  write path.
+- **Read semantics**: on every startup the hub calls
+  `restore_labels_from_snapshot`. The startup log line is
+  `labels snapshot restore: status=<status> applied=<n> path=<path>`.
+  Possible statuses are `applied` (sidecar present, rows upserted),
+  `seeded_from_db` (sidecar absent but DB has rows; sidecar
+  auto-written from DB so the next wipe is recoverable), `absent`
+  (nothing to do, fresh install), `disabled` (operator opted out),
+  `unreadable` / `unknown_schema` / `invalid` (sidecar broken, ignored).
+- **Enterprise backup coverage**: include
+  `<db-path-dir>/labels.snapshot.json` in the same backup set as
+  `hub.sqlite3`. The file is small, plain JSON, and matches the
+  `forgewire-fabric labels export` envelope schema, so it is
+  hand-restorable with any text editor in a pinch.
+- **Standby promotion**: a host promoted from `/state/import` will
+  receive the labels in the SQLite blob but no sidecar. On the first
+  hub restart after promotion the `seeded_from_db` path writes a
+  fresh sidecar from the DB rows, so the standby converges to the
+  same protection as the original primary without any manual step.
+- **ACL probe**: at construction time the hub writes a probe file
+  inside the sidecar directory. If the directory is not writable
+  the hub logs a single loud WARNING and degrades to read-only
+  restore (operator names still survive restarts but stop tracking
+  live edits). Grant the hub service account write access to the
+  directory, or point `FORGEWIRE_HUB_LABELS_SNAPSHOT` at a writable
+  path.

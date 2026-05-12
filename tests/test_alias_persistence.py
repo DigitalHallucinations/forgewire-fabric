@@ -360,15 +360,55 @@ def test_create_app_auto_restores_labels_snapshot_on_startup(
 
 
 def test_labels_snapshot_absent_is_noop(tmp_path: Path) -> None:
-    """A fresh install has no sidecar. Startup must not error; the
-    report must reflect ``status="absent"`` so an operator can tell a
-    skipped restore from a successful one in the logs.
+    """A fresh install has no sidecar AND no DB labels. Startup must
+    not error; the report must reflect ``status="absent"`` so an
+    operator can tell a skipped restore from a successful one in the
+    logs.
     """
     cfg = _make_cfg(tmp_path)
     app = create_app(cfg)
     report = app.state.labels_snapshot_report
     assert report["status"] == "absent"
     assert report["applied"] == 0
+
+
+def test_labels_snapshot_seeds_from_db_when_sidecar_missing(
+    tmp_path: Path,
+) -> None:
+    """Enterprise-deploy safety net.
+
+    First-time deploy of the snapshot feature on a hub that already
+    has operator-set labels must auto-seed the sidecar from the live
+    DB so the *next* wipe is recoverable. Same path covers a standby
+    promoted via /state/import (DB labels arrive in the SQLite blob,
+    sidecar does not) and a reimaged host that restored only the DB
+    from backup. Without this, the very first wipe after rollout
+    would lose names because the sidecar never existed.
+    """
+    cfg = _make_cfg(tmp_path)
+    snap = cfg.db_path.parent / "labels.snapshot.json"
+    # Pre-populate the DB with operator labels but NO sidecar -- the
+    # state a freshly-upgraded production hub is in on first boot.
+    bb_seed = Blackboard(cfg.db_path, labels_snapshot_path=Path(""))
+    bb_seed.set_hub_name("Test hub 1")
+    bb_seed.set_runner_alias("rid-A", "Pecision 5520")
+    assert not snap.exists()
+    # Now boot the app the way the service supervisor does. Restore
+    # must auto-seed the sidecar from the DB.
+    app = create_app(cfg)
+    report = app.state.labels_snapshot_report
+    assert report["status"] == "seeded_from_db"
+    assert report["seeded_keys"] == 2  # hub_name + 1 alias
+    assert snap.exists()
+    payload = json.loads(snap.read_text(encoding="utf-8"))
+    assert payload["labels"] == {
+        "hub_name": "Test hub 1",
+        "runner_aliases": {"rid-A": "Pecision 5520"},
+    }
+    # And labels are still readable through the API.
+    with TestClient(app) as client:
+        r = client.get("/labels", headers=_auth())
+        assert r.json()["hub_name"] == "Test hub 1"
 
 
 def test_labels_snapshot_disabled_via_empty_path(tmp_path: Path) -> None:
