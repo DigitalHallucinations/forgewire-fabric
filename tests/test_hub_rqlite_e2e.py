@@ -1,4 +1,4 @@
-"""End-to-end hub tests against the live rqlite cluster.
+"""End-to-end hub tests against a live rqlite cluster.
 
 Runs the same flows as :mod:`test_dispatcher_signing` but with
 ``backend="rqlite"`` so we exercise:
@@ -7,11 +7,22 @@ Runs the same flows as :mod:`test_dispatcher_signing` but with
 * the 9 refactored SELECT-inside-tx call sites
 * the rqlite-aware /state/snapshot and /state/import endpoints
 
-Each test uses a fresh database name within rqlite so test runs are
-independent. Note: rqlite's HTTP API exposes a single SQLite database
-per cluster, so we can't get true isolation -- instead we DROP all the
-hub tables before each test and let ``Blackboard.__init__`` re-create
-them via ``schema.sql``.
+**Non-destructive contract.** This suite is allowed to run against
+*any* rqlite cluster the developer can reach, including the
+production cluster, because the production cluster is, in practice,
+the only cluster most developers have. To make that safe we:
+
+* Never ``DROP TABLE`` or ``DELETE FROM`` shared hub tables.
+* Generate per-test unique identifiers (UUIDs) so dispatcher /
+  worker / task rows added by tests never collide with operator
+  state. Test rows linger as harmless artefacts; the alternative
+  (table wipe) wiped operator-set ``labels`` rows in production.
+* For tests that must mutate fabric-wide singletons (the
+  ``labels`` table), snapshot the live state at session start and
+  restore it at session end.
+
+If you want stricter isolation, stand up a dedicated rqlite
+cluster and point ``RQLITE_HOST`` / ``RQLITE_PORT`` at it.
 """
 from __future__ import annotations
 
@@ -20,6 +31,7 @@ import os
 import secrets
 import socket
 import time
+import uuid
 from pathlib import Path
 
 import httpx
@@ -33,39 +45,8 @@ RQLITE_HOST = os.environ.get("RQLITE_HOST", "127.0.0.1")
 RQLITE_PORT = int(os.environ.get("RQLITE_PORT", "4001"))
 HUB_TOKEN = "test-hub-token-rqlite-aaaaaaaaaaa"
 
-# Production guard: this suite is destructive (it ``DROP TABLE IF
-# EXISTS`` every hub table before each test, including ``labels``
-# which stores operator-set fabric state like ``hub_name`` and
-# ``runner_alias:<runner_id>``). Pointing it at a non-loopback host
-# without opting in would silently wipe a live cluster. We refuse
-# unless ``FORGEWIRE_TEST_RQLITE_DESTRUCTIVE_OK=1`` is explicitly
-# set. Loopback (127.0.0.1 / ::1 / localhost) is exempt because the
-# only way a developer hits a loopback rqlite is by standing one up
-# locally for tests.
-_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
-_DESTRUCTIVE_OK = os.environ.get("FORGEWIRE_TEST_RQLITE_DESTRUCTIVE_OK") == "1"
-
-# Order matters: drop child tables before parents so FK isn't violated.
-_HUB_TABLES = [
-    "task_streams",
-    "results",
-    "progress",
-    "notes",
-    "labels",
-    "dispatchers",
-    "runners",
-    "workers",
-    "tasks",
-]
-
 
 def _cluster_reachable() -> bool:
-    if RQLITE_HOST not in _LOOPBACK_HOSTS and not _DESTRUCTIVE_OK:
-        # Refuse to run destructively against any host that isn't
-        # loopback unless the operator opted in. This keeps a stray
-        # ``pytest`` invocation on a dev box from wiping production
-        # labels / aliases / runners.
-        return False
     try:
         with socket.create_connection((RQLITE_HOST, RQLITE_PORT), timeout=1.0):
             pass
@@ -82,30 +63,85 @@ def _cluster_reachable() -> bool:
 
 pytestmark = pytest.mark.skipif(
     not _cluster_reachable(),
-    reason=(
-        f"rqlite cluster {RQLITE_HOST}:{RQLITE_PORT} not reachable or "
-        "non-loopback without FORGEWIRE_TEST_RQLITE_DESTRUCTIVE_OK=1"
-    ),
+    reason=f"rqlite cluster {RQLITE_HOST}:{RQLITE_PORT} not reachable",
 )
 
 
-@pytest.fixture(autouse=True)
-def _clean_cluster():
-    """Drop all hub tables before each test so we start from schema.sql.
+@pytest.fixture(scope="session", autouse=True)
+def _labels_snapshot():
+    """Snapshot ``labels`` at session start, restore at session end.
 
-    rqlite is a single shared database; tests must be sequential. The
-    in-memory stream-counter inside Blackboard resets per ``__init__``
-    so no Python-side state leaks across tests.
+    The ``labels`` table holds fabric-wide singletons (``hub_name``
+    plus ``runner_alias:<runner_id>`` rows) that operators set by
+    hand. The labels parity test below has to mutate those keys,
+    which would clobber operator state on a shared cluster. We
+    capture every row up front, let the tests run, then re-apply
+    the captured set verbatim (and delete anything the tests added
+    on top).
     """
-    statements = [[f"DROP TABLE IF EXISTS {t}"] for t in _HUB_TABLES]
     with httpx.Client(
         base_url=f"http://{RQLITE_HOST}:{RQLITE_PORT}",
-        timeout=20.0,
+        timeout=10.0,
         follow_redirects=True,
     ) as c:
-        r = c.post("/db/execute?transaction=true", json=statements)
-        assert r.status_code == 200, r.text
-    yield
+        # If the table doesn't exist yet the query errors out; the
+        # first Blackboard() ctor will create it. Treat "missing" as
+        # an empty snapshot.
+        try:
+            r = c.post(
+                "/db/query?level=strong",
+                json=[
+                    "SELECT key, value, updated_by FROM labels"
+                ],
+            )
+            r.raise_for_status()
+            res = r.json()["results"][0]
+            cols = res.get("columns", [])
+            rows = [
+                dict(zip(cols, v)) for v in res.get("values", []) or []
+            ]
+        except Exception:  # noqa: BLE001
+            rows = []
+    yield rows
+    # Restore: re-upsert every captured row, then delete any key not
+    # in the snapshot.
+    with httpx.Client(
+        base_url=f"http://{RQLITE_HOST}:{RQLITE_PORT}",
+        timeout=10.0,
+        follow_redirects=True,
+    ) as c:
+        statements: list[list] = []
+        for row in rows:
+            statements.append(
+                [
+                    """INSERT INTO labels (key, value, updated_by, updated_at)
+                       VALUES (?, ?, ?, datetime('now'))
+                       ON CONFLICT(key) DO UPDATE SET
+                           value = excluded.value,
+                           updated_by = excluded.updated_by,
+                           updated_at = excluded.updated_at""",
+                    row["key"],
+                    row["value"],
+                    row.get("updated_by"),
+                ]
+            )
+        captured_keys = [row["key"] for row in rows]
+        # Delete any key the tests added on top of the snapshot.
+        try:
+            r = c.post(
+                "/db/query?level=strong",
+                json=["SELECT key FROM labels"],
+            )
+            r.raise_for_status()
+            res = r.json()["results"][0]
+            live_keys = [v[0] for v in res.get("values", []) or []]
+        except Exception:  # noqa: BLE001
+            live_keys = []
+        for k in live_keys:
+            if k not in captured_keys:
+                statements.append(["DELETE FROM labels WHERE key = ?", k])
+        if statements:
+            c.post("/db/execute", json=statements).raise_for_status()
 
 
 def _make_app(tmp_path: Path, *, require_signed: bool = False):
@@ -126,8 +162,19 @@ def _canonical(body: dict) -> bytes:
     return json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
-def _ident(tmp_path: Path, label: str = "test-dispatcher") -> DispatcherIdentity:
-    return load_or_create(tmp_path / "dispatcher_identity.json", label=label)
+def _ident(tmp_path: Path, label: str | None = None) -> DispatcherIdentity:
+    """Return a *fresh* DispatcherIdentity per call.
+
+    Tests must not reuse a dispatcher_id across runs because the
+    upsert_dispatcher binding check rejects re-binds. Each call
+    writes to a unique subpath under ``tmp_path`` so identities are
+    independent.
+    """
+    sub = tmp_path / f"ident-{uuid.uuid4().hex[:8]}"
+    return load_or_create(
+        sub / "dispatcher_identity.json",
+        label=label or f"test-dispatcher-{uuid.uuid4().hex[:6]}",
+    )
 
 
 def _sign_register(ident: DispatcherIdentity) -> dict:
@@ -326,55 +373,88 @@ def test_labels_round_trip_under_rqlite(tmp_path):
     pattern (no SELECT/RETURNING inside the buffered txn). This test
     locks that contract in so the rqlite backend can't silently
     regress.
+
+    Non-destructive: uses UUID-suffixed alias keys so it never
+    collides with operator-set runner aliases, and snapshots +
+    restores ``hub_name`` around its own mutation so the live
+    cluster's operator-set hub name is preserved.
     """
+    rid_a = f"rid-test-{uuid.uuid4().hex}"
+    rid_b = f"rid-test-{uuid.uuid4().hex}"
+    test_hub_name_a = f"rqlite-parity-{uuid.uuid4().hex[:6]}"
+    test_hub_name_b = f"rqlite-parity-{uuid.uuid4().hex[:6]}"
+
     app = _make_app(tmp_path)
     with TestClient(app) as client:
-        # Empty registry on a freshly-DROP'd labels table.
+        # Snapshot the live hub_name so we can restore it after we
+        # mutate the singleton.
         r = client.get("/labels", headers=_auth())
         assert r.status_code == 200
-        assert r.json() == {"hub_name": "", "runner_aliases": {}}
+        original_hub_name = r.json()["hub_name"]
 
-        # Set hub_name -- single INSERT path.
-        r = client.put(
-            "/labels/hub", json={"name": "rqlite-parity-hub"}, headers=_auth()
-        )
-        assert r.status_code == 200, r.text
-        assert r.json()["hub_name"] == "rqlite-parity-hub"
+        # Our test-scoped alias keys must NOT exist yet.
+        existing_aliases = r.json()["runner_aliases"]
+        assert rid_a not in existing_aliases
+        assert rid_b not in existing_aliases
 
-        # Upsert hub_name -- INSERT...ON CONFLICT DO UPDATE path.
-        r = client.put(
-            "/labels/hub", json={"name": "rqlite-parity-hub-v2"}, headers=_auth()
-        )
-        assert r.status_code == 200
-        assert r.json()["hub_name"] == "rqlite-parity-hub-v2"
+        try:
+            # Set hub_name -- single INSERT path.
+            r = client.put(
+                "/labels/hub", json={"name": test_hub_name_a}, headers=_auth()
+            )
+            assert r.status_code == 200, r.text
+            assert r.json()["hub_name"] == test_hub_name_a
 
-        # Per-runner aliases (multiple keys with the runner_alias: prefix).
-        r = client.put(
-            "/labels/runners/rid-A",
-            json={"alias": "Alpha"},
-            headers=_auth(),
-        )
-        assert r.status_code == 200
-        r = client.put(
-            "/labels/runners/rid-B",
-            json={"alias": "Bravo"},
-            headers=_auth(),
-        )
-        assert r.status_code == 200
+            # Upsert hub_name -- INSERT...ON CONFLICT DO UPDATE path.
+            r = client.put(
+                "/labels/hub", json={"name": test_hub_name_b}, headers=_auth()
+            )
+            assert r.status_code == 200
+            assert r.json()["hub_name"] == test_hub_name_b
 
-        # Read everything back; rqlite's strong-consistency read must see
-        # all three rows.
-        r = client.get("/labels", headers=_auth())
-        body = r.json()
-        assert body["hub_name"] == "rqlite-parity-hub-v2"
-        assert body["runner_aliases"] == {"rid-A": "Alpha", "rid-B": "Bravo"}
+            # Per-runner aliases (multiple keys with the runner_alias: prefix).
+            r = client.put(
+                f"/labels/runners/{rid_a}",
+                json={"alias": "Alpha"},
+                headers=_auth(),
+            )
+            assert r.status_code == 200
+            r = client.put(
+                f"/labels/runners/{rid_b}",
+                json={"alias": "Bravo"},
+                headers=_auth(),
+            )
+            assert r.status_code == 200
 
-        # Clear one alias -- DELETE path. The other rows must remain.
-        r = client.put(
-            "/labels/runners/rid-A", json={"alias": ""}, headers=_auth()
-        )
-        assert r.status_code == 200
-        r = client.get("/labels", headers=_auth())
-        body = r.json()
-        assert body["runner_aliases"] == {"rid-B": "Bravo"}
-        assert body["hub_name"] == "rqlite-parity-hub-v2"
+            # Read everything back; rqlite's strong-consistency read must see
+            # our rows.
+            r = client.get("/labels", headers=_auth())
+            body = r.json()
+            assert body["hub_name"] == test_hub_name_b
+            assert body["runner_aliases"].get(rid_a) == "Alpha"
+            assert body["runner_aliases"].get(rid_b) == "Bravo"
+
+            # Clear one alias -- DELETE path. The other test row must remain.
+            r = client.put(
+                f"/labels/runners/{rid_a}",
+                json={"alias": ""},
+                headers=_auth(),
+            )
+            assert r.status_code == 200
+            r = client.get("/labels", headers=_auth())
+            body = r.json()
+            assert rid_a not in body["runner_aliases"]
+            assert body["runner_aliases"].get(rid_b) == "Bravo"
+        finally:
+            # Restore operator state.
+            client.put(
+                "/labels/hub",
+                json={"name": original_hub_name},
+                headers=_auth(),
+            )
+            for rid in (rid_a, rid_b):
+                client.put(
+                    f"/labels/runners/{rid}",
+                    json={"alias": ""},
+                    headers=_auth(),
+                )
