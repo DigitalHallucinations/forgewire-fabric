@@ -150,6 +150,8 @@ class BlackboardClient:
         result = await self._request(
             "POST", f"/tasks/{task_id}/result", json=payload
         )
+        assert result is not None
+        return result
 
     # --------------------------------------------------------------- v2 API
 
@@ -217,13 +219,11 @@ class BlackboardClient:
         ``X-Snapshot-Generated-At`` / ``X-Hub-Started-At`` metadata when
         persisting it.
         """
-        last_exc: Exception | None = None
         for attempt in range(3):
             try:
                 response = await self._client.request("GET", "/state/snapshot")
                 break
             except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError) as exc:
-                last_exc = exc
                 if attempt == 2:
                     raise BlackboardError(0, f"transport error after 3 attempts: {exc}") from exc
                 await asyncio.sleep(0.5 * (2 ** attempt))

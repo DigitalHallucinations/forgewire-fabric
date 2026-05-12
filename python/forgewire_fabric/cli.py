@@ -506,7 +506,6 @@ def runner_identity_export(
     output: str | None, source: str | None, bundle: bool
 ) -> None:
     from forgewire_fabric.runner.identity import (
-        DEFAULT_IDENTITY_PATH,
         export_identity,
         export_runner_bundle,
     )
