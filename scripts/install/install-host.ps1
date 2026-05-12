@@ -19,8 +19,11 @@
       1. scripts/install/nssm-install-runner.ps1
          -- installs/updates the always-on command runner service.
       2. `forgewire-fabric mcp install --with-runner`
-         -- registers the agent runner MCP server in the user-scope
-           VS Code mcp.json (forgewire-dispatcher + forgewire-runner).
+        -- registers dispatcher + agent-runner MCP servers in the
+         user-scope VS Code mcp.json.
+     3. `forgewire-fabric dispatchers register`
+        -- registers this host's signed dispatcher identity so Hosts can
+         show Dispatch=registered, not merely installed.
 
     The agent runner is *not* a daemon by design. Copilot Chat is the
     execution surface, so "always available" for the agent kind means
@@ -48,9 +51,9 @@
     Optional comma-separated scope prefix allowlist.
 
 .PARAMETER NoAgentMcp
-    Skip the `mcp install --with-runner` step. Use this on hosts that
-    have no human VS Code user (e.g. headless OptiPlex). The command
-    runner service still gets installed.
+    Skip the `forgewire-runner` MCP entry. The dispatcher MCP entry still
+    gets installed and registered because every headed operator machine may
+    drive work even when it does not run an interactive agent runner.
 
 .EXAMPLE
     pwsh -File install-host.ps1 `
@@ -139,40 +142,68 @@ Register-HostRole -Role "command_runner" -Enabled $true -Status "installed" -Met
 }
 
 # ---------------------------------------------------------------------------
-# 2) Agent runner (VS Code MCP server registration).
+# 2) Dispatcher + agent MCP server registration.
 #
-# The agent runner is an interactive Copilot Chat MCP session, not a
-# service. What we do here is make it *discoverable*: write the
-# user-scope mcp.json entries so the chat mode + tools are wired the
-# next time the user opens VS Code. The actual claim loop is driven by
-# the operator opening the `forgewire-runner` chat mode (or by
-# scripts/wake_runner.ps1 over SSH from another host).
+# The dispatcher is a signed task-creation identity. The agent runner is an
+# interactive Copilot Chat MCP session, not a service. What we do here is make
+# both discoverable in user-scope mcp.json, then register the dispatcher
+# identity with the hub so the Hosts pane can show Dispatch=registered.
 # ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "==[ Phase 6 / step 2 ]== Registering dispatcher MCP server in user-scope mcp.json..." -ForegroundColor Cyan
+if (-not $NoAgentMcp) {
+    Write-Host "  Also registering agent runner MCP server."
+}
+
+# `mcp install` writes to the *invoking user's* VS Code config dir. If this
+# script self-elevated, the invoking user is the admin shell, which is probably
+# NOT the user who runs Copilot Chat. Detect and warn instead of silently
+# writing the wrong user's profile.
+$whoami = (whoami).Trim()
+Write-Host "  Writing mcp.json under: $whoami"
+Write-Host "  (If this is the elevated admin and your normal Copilot user differs,"
+Write-Host "   re-run this script unelevated or run 'forgewire-fabric mcp install"
+Write-Host "   --with-runner --workspace-root $WorkspaceRoot' as your normal user.)"
+
+$mcpArgs = @("-m", "forgewire_fabric.cli", "mcp", "install", "--hub-url", $HubUrl)
+if (-not $NoAgentMcp) {
+    $mcpArgs += @("--with-runner", "--workspace-root", $WorkspaceRoot)
+}
+& $PythonExe @mcpArgs
+if ($LASTEXITCODE -ne 0) {
+    throw "forgewire-fabric mcp install exited with code $LASTEXITCODE."
+}
+Write-Host "==[ Phase 6 / step 2 ]== MCP servers registered." -ForegroundColor Green
+Register-HostRole -Role "dispatch" -Enabled $true -Status "installed" -Metadata @{
+    mcp_server = "forgewire-dispatcher"
+}
+
+Write-Host "==[ Phase 6 / step 2 ]== Registering signed dispatcher identity with hub..." -ForegroundColor Cyan
+$oldHubUrl = $env:FORGEWIRE_HUB_URL
+$oldHubToken = $env:FORGEWIRE_HUB_TOKEN
+try {
+    $env:FORGEWIRE_HUB_URL = $HubUrl
+    $env:FORGEWIRE_HUB_TOKEN = $Token.Trim()
+    & $PythonExe -m forgewire_fabric.cli dispatchers register --hostname $env:COMPUTERNAME
+    if ($LASTEXITCODE -ne 0) {
+        throw "forgewire-fabric dispatchers register exited with code $LASTEXITCODE."
+    }
+    Write-Host "==[ Phase 6 / step 2 ]== Dispatcher registered." -ForegroundColor Green
+} catch {
+    Write-Warning "Dispatcher registration failed: $($_.Exception.Message)"
+} finally {
+    $env:FORGEWIRE_HUB_URL = $oldHubUrl
+    $env:FORGEWIRE_HUB_TOKEN = $oldHubToken
+}
+
 if ($NoAgentMcp) {
     Write-Host ""
-    Write-Host "==[ Phase 6 / step 2 ]== Skipping agent runner MCP install (-NoAgentMcp)." -ForegroundColor Yellow
+    Write-Host "==[ Phase 6 / step 2 ]== Skipped agent runner MCP entry (-NoAgentMcp)." -ForegroundColor Yellow
     Register-HostRole -Role "agent_runner" -Enabled $false -Status "skipped" -Metadata @{
         reason = "NoAgentMcp"
         workspace_root = $WorkspaceRoot
     }
 } else {
-    Write-Host ""
-    Write-Host "==[ Phase 6 / step 2 ]== Registering agent runner MCP server in user-scope mcp.json..." -ForegroundColor Cyan
-
-    # `mcp install --with-runner` writes to the *invoking user's* VS Code
-    # config dir. If this script self-elevated, the invoking user is the
-    # admin shell, which is probably NOT the user who runs Copilot Chat.
-    # Detect and warn instead of silently writing the wrong user's profile.
-    $whoami = (whoami).Trim()
-    Write-Host "  Writing mcp.json under: $whoami"
-    Write-Host "  (If this is the elevated admin and your normal Copilot user differs,"
-    Write-Host "   re-run this script unelevated or run 'forgewire-fabric mcp install"
-    Write-Host "   --with-runner --workspace-root $WorkspaceRoot' as your normal user.)"
-
-    & $PythonExe -m forgewire_fabric.cli mcp install --with-runner --hub-url $HubUrl --workspace-root $WorkspaceRoot
-    if ($LASTEXITCODE -ne 0) {
-        throw "forgewire-fabric mcp install exited with code $LASTEXITCODE."
-    }
     Write-Host "==[ Phase 6 / step 2 ]== Agent runner MCP registered." -ForegroundColor Green
     Register-HostRole -Role "agent_runner" -Enabled $true -Status "registered" -Metadata @{
         mcp_server = "forgewire-runner"
@@ -182,6 +213,7 @@ if ($NoAgentMcp) {
 
 Write-Host ""
 Write-Host "Both runner kinds are now available on this host:" -ForegroundColor Green
+Write-Host "  * dispatch     -- VS Code MCP server 'forgewire-dispatcher' (signed)."
 Write-Host "  * kind:command -- Windows service '$ServiceName' (auto-start)."
 if (-not $NoAgentMcp) {
     Write-Host "  * kind:agent   -- VS Code MCP server 'forgewire-runner'."

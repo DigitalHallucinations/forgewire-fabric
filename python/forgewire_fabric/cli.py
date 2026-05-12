@@ -1268,28 +1268,7 @@ async def _dispatch_signed(ident: Any, payload: dict[str, Any]) -> None:
                 raise
         # Auto-register on first signed dispatch and retry once.
         click.echo("Registering dispatcher with hub on first use...", err=True)
-        reg_ts = int(_time.time())
-        reg_nonce = _secrets.token_hex(16)
-        reg_body = {
-            "op": "register-dispatcher",
-            "dispatcher_id": ident.dispatcher_id,
-            "public_key": ident.public_key_hex,
-            "timestamp": reg_ts,
-            "nonce": reg_nonce,
-        }
-        reg_canon = _json.dumps(reg_body, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        reg_sig = ident.sign(reg_canon)
-        await c.register_dispatcher(
-            {
-                "dispatcher_id": ident.dispatcher_id,
-                "public_key": ident.public_key_hex,
-                "label": ident.label,
-                "hostname": _socket.gethostname(),
-                "timestamp": reg_ts,
-                "nonce": reg_nonce,
-                "signature": reg_sig,
-            }
-        )
+        await _register_dispatcher_with_client(c, ident, hostname=_socket.gethostname())
         # Re-sign with a fresh nonce/timestamp and retry the dispatch.
         timestamp = int(_time.time())
         nonce = _secrets.token_hex(16)
@@ -1300,6 +1279,58 @@ async def _dispatch_signed(ident: Any, payload: dict[str, Any]) -> None:
         full["nonce"] = nonce
         full["signature"] = ident.sign(canonical)
         _print_json(await c.dispatch_task_signed(full))
+
+
+async def _register_dispatcher_with_client(
+    client: Any,
+    ident: Any,
+    *,
+    hostname: str,
+) -> dict[str, Any]:
+    import json as _json
+    import secrets as _secrets
+    import time as _time
+
+    timestamp = int(_time.time())
+    nonce = _secrets.token_hex(16)
+    body = {
+        "op": "register-dispatcher",
+        "dispatcher_id": ident.dispatcher_id,
+        "public_key": ident.public_key_hex,
+        "timestamp": timestamp,
+        "nonce": nonce,
+    }
+    canonical = _json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    payload = {
+        "dispatcher_id": ident.dispatcher_id,
+        "public_key": ident.public_key_hex,
+        "label": ident.label,
+        "hostname": hostname,
+        "metadata": {"dispatch_enabled": True},
+        "timestamp": timestamp,
+        "nonce": nonce,
+        "signature": ident.sign(canonical),
+    }
+    result = await client.register_dispatcher(payload)
+    try:
+        await client.set_host_role(
+            {
+                "hostname": hostname,
+                "role": "dispatch",
+                "enabled": True,
+                "status": "registered",
+                "metadata": {
+                    "dispatcher_id": ident.dispatcher_id,
+                    "label": ident.label,
+                },
+            }
+        )
+    except Exception:
+        # Dispatcher registration is the source of truth for signed dispatch.
+        # Host-role reporting is UI enrichment; do not fail dispatch because
+        # an older hub lacks /hosts/roles.
+        pass
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -1696,6 +1727,38 @@ def dispatchers_list() -> None:
     async def _go() -> None:
         async with _client() as c:
             _print_json(await c.list_dispatchers())
+
+    _async(_go())
+
+
+@dispatchers_group.command(
+    "register",
+    help="Create/load a dispatcher identity, register it with the hub, and mark this host dispatch-enabled.",
+)
+@click.option(
+    "--identity",
+    "identity_path",
+    default=None,
+    help="Path to dispatcher_identity.json (default: ~/.forgewire/dispatcher_identity.json).",
+)
+@click.option("--label", default=None, help="Dispatcher label (default: hostname).")
+@click.option("--hostname", default=None, help="Hostname to report (default: socket.gethostname()).")
+def dispatchers_register(identity_path: str | None, label: str | None, hostname: str | None) -> None:
+    import socket as _socket
+
+    from forgewire_fabric.dispatcher.identity import load_or_create
+
+    ident = load_or_create(Path(identity_path) if identity_path else None, label=label)
+    reported_hostname = hostname or _socket.gethostname()
+
+    async def _go() -> None:
+        async with _client() as c:
+            result = await _register_dispatcher_with_client(
+                c,
+                ident,
+                hostname=reported_hostname,
+            )
+        _print_json(result)
 
     _async(_go())
 

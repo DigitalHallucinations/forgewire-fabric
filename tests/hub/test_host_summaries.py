@@ -159,10 +159,33 @@ def test_host_role_report_requires_auth(tmp_path: Path) -> None:
 def test_dispatcher_only_rows_do_not_create_hosts(tmp_path: Path) -> None:
     app = _make_app(tmp_path)
     with TestClient(app) as client:
-        _register_dispatcher(client, tmp_path, hostname="test-host")
+        # Legacy/pre-role dispatcher rows may exist in a live hub DB from old
+        # tests or manual probes. They enrich an existing host, but do not
+        # create a host node unless paired with an explicit dispatch role fact.
+        app.state.blackboard.upsert_dispatcher(
+            dispatcher_id="legacy-dispatcher",
+            public_key="a" * 64,
+            label="legacy",
+            hostname="test-host",
+            metadata={},
+        )
 
         r = client.get("/hosts", headers=_auth())
         assert r.status_code == 200, r.text
         hostnames = {h["hostname"] for h in r.json()["hosts"]}
         assert socket.gethostname() in hostnames
         assert "test-host" not in hostnames
+
+
+def test_dispatcher_registration_creates_dispatch_role(tmp_path: Path) -> None:
+    app = _make_app(tmp_path)
+    with TestClient(app) as client:
+        dispatcher_id = _register_dispatcher(client, tmp_path, hostname="DRIVER-A")
+
+        r = client.get("/hosts", headers=_auth())
+        assert r.status_code == 200, r.text
+        hosts = {h["hostname"]: h for h in r.json()["hosts"]}
+        summary = hosts["DRIVER-A"]
+        assert summary["roles"]["dispatch"]["enabled"] is True
+        assert summary["roles"]["dispatch"]["status"] == "registered"
+        assert summary["roles"]["dispatch"]["dispatcher_ids"] == [dispatcher_id]

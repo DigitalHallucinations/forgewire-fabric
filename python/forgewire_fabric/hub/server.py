@@ -670,6 +670,15 @@ class Blackboard:
             ).fetchall()
         return [_host_role_row_to_dict(row) for row in rows]
 
+    def get_host_role(self, *, hostname: str, role: str) -> dict[str, Any] | None:
+        hostname = _normalize_hostname(hostname)
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM host_roles WHERE hostname = ? AND role = ?",
+                (hostname, role),
+            ).fetchone()
+        return _host_role_row_to_dict(row) if row is not None else None
+
     # ----- labels snapshot sidecar (filesystem mirror) ----------------
 
     def _write_labels_snapshot(self) -> None:
@@ -3669,6 +3678,17 @@ def create_app(config: BlackboardConfig) -> FastAPI:
                 hostname=payload.hostname,
                 metadata=payload.metadata,
             )
+            if payload.hostname:
+                blackboard.set_host_role(
+                    hostname=payload.hostname,
+                    role="dispatch",
+                    enabled=True,
+                    status="registered",
+                    metadata={
+                        "dispatcher_id": payload.dispatcher_id,
+                        "label": payload.label,
+                    },
+                )
         except PermissionError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {
@@ -3718,6 +3738,18 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             )
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
+        dispatcher = blackboard.get_dispatcher(payload.dispatcher_id)
+        dispatcher_hostname = dispatcher.get("hostname")
+        if dispatcher_hostname:
+            dispatch_role = blackboard.get_host_role(
+                hostname=str(dispatcher_hostname),
+                role="dispatch",
+            )
+            if dispatch_role is not None and not dispatch_role.get("enabled"):
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"dispatch disabled for host {dispatcher_hostname}",
+                )
         _enforce_dispatch_gate(
             task_id=(payload.todo_id or payload.title),
             scope_globs=payload.scope_globs,

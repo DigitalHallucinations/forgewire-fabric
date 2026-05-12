@@ -127,6 +127,32 @@ def test_register_then_signed_dispatch_happy_path(tmp_path):
         assert ident.dispatcher_id in ids
 
 
+def test_signed_dispatch_rejected_when_host_dispatch_disabled(tmp_path):
+    app = _make_app(tmp_path)
+    ident = _ident(tmp_path)
+    with TestClient(app) as client:
+        r = client.post(
+            "/dispatchers/register", json=_sign_register(ident), headers=_auth()
+        )
+        assert r.status_code == 200, r.text
+
+        r = client.post(
+            "/hosts/roles",
+            json={
+                "hostname": "test-host",
+                "role": "dispatch",
+                "enabled": False,
+                "status": "disabled",
+            },
+            headers=_auth(),
+        )
+        assert r.status_code == 200, r.text
+
+        r = client.post("/tasks/v2", json=_sign_dispatch(ident), headers=_auth())
+        assert r.status_code == 403
+        assert "dispatch disabled" in r.text
+
+
 def test_replay_nonce_is_rejected(tmp_path):
     app = _make_app(tmp_path)
     ident = _ident(tmp_path)
