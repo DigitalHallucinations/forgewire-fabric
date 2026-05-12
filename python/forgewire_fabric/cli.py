@@ -680,6 +680,18 @@ def runner_config_clear(path: str | None) -> None:
               help="Concurrency cap. Seeds the sidecar.")
 @click.option("--poll-interval", type=float, default=None,
               help="Empty-claim poll interval (seconds). Seeds the sidecar.")
+@click.option("--hub-ssh-host", default=None,
+              help="Hub SSH target (DNS/IP). Enables cross-host hub watchdog from this node.")
+@click.option("--hub-ssh-user", default=None,
+              help="SSH user on the hub host (paired with --hub-ssh-host/--hub-ssh-key-file).")
+@click.option("--hub-ssh-key-file", default=None,
+              help="Path to the SSH private key. Copied to a SYSTEM-readable location at install time.")
+@click.option("--hub-service-name", default="ForgeWireHub",
+              help="Remote hub service name to restart on liveness failure (default: ForgeWireHub).")
+@click.option("--hub-healthz-url", default=None,
+              help="Health probe URL. Defaults to <hub-url>/healthz.")
+@click.option("--no-hub-watchdog", is_flag=True,
+              help="Skip the cross-host hub watchdog even when SSH credentials are supplied.")
 def runner_install(
     hub_url: str,
     hub_token: str,
@@ -689,6 +701,12 @@ def runner_install(
     tenant: str | None,
     max_concurrent: int | None,
     poll_interval: float | None,
+    hub_ssh_host: str | None,
+    hub_ssh_user: str | None,
+    hub_ssh_key_file: str | None,
+    hub_service_name: str,
+    hub_healthz_url: str | None,
+    no_hub_watchdog: bool,
 ) -> None:
     from forgewire_fabric.install import install_runner
 
@@ -701,6 +719,12 @@ def runner_install(
         tenant=tenant,
         max_concurrent=max_concurrent,
         poll_interval=poll_interval,
+        hub_ssh_host=hub_ssh_host,
+        hub_ssh_user=hub_ssh_user,
+        hub_ssh_key_file=hub_ssh_key_file,
+        hub_service_name=hub_service_name,
+        hub_healthz_url=hub_healthz_url,
+        no_hub_watchdog=no_hub_watchdog,
     )
 
 
@@ -841,6 +865,14 @@ def mcp_uninstall() -> None:
               help="Hub bind host. Use 0.0.0.0 to accept LAN runners.")
 @click.option("--workspace-root", default=None,
               help="Runner workspace root. Defaults to the current directory.")
+@click.option("--hub-ssh-host", default=None,
+              help="(runner role) Hub SSH target. Enables cross-host hub watchdog.")
+@click.option("--hub-ssh-user", default=None,
+              help="(runner role) SSH user on the hub host.")
+@click.option("--hub-ssh-key-file", default=None,
+              help="(runner role) Path to the SSH private key for the hub watchdog.")
+@click.option("--no-hub-watchdog", is_flag=True,
+              help="(runner role) Skip the cross-host hub watchdog even when SSH credentials are supplied.")
 def setup(
     role: str,
     hub_url: str | None,
@@ -848,6 +880,10 @@ def setup(
     port: int,
     bind_host: str,
     workspace_root: str | None,
+    hub_ssh_host: str | None,
+    hub_ssh_user: str | None,
+    hub_ssh_key_file: str | None,
+    no_hub_watchdog: bool,
 ) -> None:
     from pathlib import Path as _P
 
@@ -892,7 +928,15 @@ def setup(
     if install_role_runner:
         assert hub_url is not None and hub_token is not None and workspace_root is not None
         click.echo(f"Installing runner -> {hub_url} (workspace: {workspace_root})...")
-        install_runner(hub_url=hub_url, hub_token=hub_token, workspace_root=workspace_root)
+        install_runner(
+            hub_url=hub_url,
+            hub_token=hub_token,
+            workspace_root=workspace_root,
+            hub_ssh_host=hub_ssh_host,
+            hub_ssh_user=hub_ssh_user,
+            hub_ssh_key_file=hub_ssh_key_file,
+            no_hub_watchdog=no_hub_watchdog or install_role_hub,
+        )
 
     # --- VS Code wiring (user-readable token + extension settings) ---
     # The system-wide token at C:\ProgramData\forgewire\hub.token is locked to

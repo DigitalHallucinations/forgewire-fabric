@@ -58,3 +58,67 @@ def test_installer_asset_in_sync(name: str) -> None:
         f"  bundled: {dst}\n"
         f"Run `pwsh -File scripts/dev/sync_installer_assets.ps1` to sync."
     )
+
+
+def test_runner_installer_exposes_hub_ssh_failover_params() -> None:
+    """OOTB cross-host hub failover: the runner installer MUST accept and
+    forward the SSH-target parameters so a single ``forgewire-fabric setup``
+    or ``runner install`` invocation wires every fabric node with a hub
+    watchdog. If any of these are dropped, peers stop being able to
+    restart a wedged hub.
+    """
+    body = (SOURCE_DIR / "nssm-install-runner.ps1").read_text(encoding="utf-8")
+    for needle in (
+        "$HubSshHost",
+        "$HubSshUser",
+        "$HubSshKeyFile",
+        "$HubServiceName",
+        "$HubHealthzUrl",
+        "NoHubWatchdog",
+        "hub-restart.ed25519",
+        "install-hub-watchdog.ps1",
+        "ssh-keyscan",
+    ):
+        assert needle in body, (
+            f"nssm-install-runner.ps1 missing required token '{needle}'. "
+            "Cross-host hub watchdog cannot be wired OOTB without it."
+        )
+
+
+def test_hub_watchdog_supports_remote_ssh_restart() -> None:
+    """The hub watchdog MUST be able to restart the hub on a peer host via
+    SSH. Anything less and the failover wiring in nssm-install-runner.ps1
+    would silently degrade to log-noise."""
+    body = (SOURCE_DIR / "install-hub-watchdog.ps1").read_text(encoding="utf-8")
+    for needle in (
+        "$SshHost",
+        "$SshUser",
+        "$SshKeyFile",
+        "$RemoteServiceName",
+        "$KnownHostsFile",
+        "ssh.exe",
+        "BatchMode=yes",
+    ):
+        assert needle in body, (
+            f"install-hub-watchdog.ps1 missing required token '{needle}'."
+        )
+
+
+def test_watchdogs_use_system_reachable_pwsh_host() -> None:
+    """Both watchdog scheduled tasks MUST resolve a SYSTEM-reachable
+    PowerShell host at install time. Using bare 'pwsh.exe' picks up the
+    Microsoft Store install under WindowsApps/, which is not executable
+    by the SYSTEM scheduled task account (ERROR_FILE_NOT_FOUND), silently
+    breaking the watchdog."""
+    for name in ("install-hub-watchdog.ps1", "install-runner-watchdog.ps1"):
+        body = (SOURCE_DIR / name).read_text(encoding="utf-8")
+        assert "WindowsPowerShell\\v1.0\\powershell.exe" in body, (
+            f"{name}: missing built-in WindowsPowerShell 5.1 fallback for SYSTEM."
+        )
+        assert "ProgramFiles\\PowerShell\\7\\pwsh.exe" in body, (
+            f"{name}: missing preferred pwsh 7 path."
+        )
+        assert "-Execute \"pwsh.exe\"" not in body, (
+            f"{name}: still using bare 'pwsh.exe' which SYSTEM cannot launch "
+            "when pwsh comes from the Microsoft Store."
+        )

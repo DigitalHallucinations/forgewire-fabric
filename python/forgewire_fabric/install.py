@@ -99,7 +99,18 @@ def _windows_install_hub(*, port: int, host: str, token: str | None) -> None:
     subprocess.run(cmd, check=True, env=_powershell_env())
 
 
-def _windows_install_runner(*, hub_url: str, hub_token: str, workspace_root: str) -> None:
+def _windows_install_runner(
+    *,
+    hub_url: str,
+    hub_token: str,
+    workspace_root: str,
+    hub_ssh_host: str | None = None,
+    hub_ssh_user: str | None = None,
+    hub_ssh_key_file: str | None = None,
+    hub_service_name: str = "ForgeWireHub",
+    hub_healthz_url: str | None = None,
+    no_hub_watchdog: bool = False,
+) -> None:
     if shutil.which("nssm.exe") is None:
         raise SystemExit("NSSM not found on PATH.")
     script = _asset("nssm-install-runner.ps1")
@@ -119,6 +130,18 @@ def _windows_install_runner(*, hub_url: str, hub_token: str, workspace_root: str
         "-WorkspaceRoot",
         workspace_root,
     ]
+    if hub_ssh_host:
+        cmd += ["-HubSshHost", hub_ssh_host]
+    if hub_ssh_user:
+        cmd += ["-HubSshUser", hub_ssh_user]
+    if hub_ssh_key_file:
+        cmd += ["-HubSshKeyFile", hub_ssh_key_file]
+    if hub_service_name and hub_service_name != "ForgeWireHub":
+        cmd += ["-HubServiceName", hub_service_name]
+    if hub_healthz_url:
+        cmd += ["-HubHealthzUrl", hub_healthz_url]
+    if no_hub_watchdog:
+        cmd += ["-NoHubWatchdog"]
     subprocess.run(cmd, check=True, env=_powershell_env())
 
 
@@ -215,6 +238,12 @@ def install_runner(
     tenant: str | None = None,
     max_concurrent: int | None = None,
     poll_interval: float | None = None,
+    hub_ssh_host: str | None = None,
+    hub_ssh_user: str | None = None,
+    hub_ssh_key_file: str | None = None,
+    hub_service_name: str = "ForgeWireHub",
+    hub_healthz_url: str | None = None,
+    no_hub_watchdog: bool = False,
 ) -> None:
     # Bootstrap the machine-wide identity directory before the service
     # starts so the runner — regardless of the OS account it runs under —
@@ -248,7 +277,17 @@ def install_runner(
         sidecar["poll_interval_seconds"] = poll_interval
     save_runner_config_overrides(sidecar)
     if sys.platform.startswith("win"):
-        _windows_install_runner(hub_url=hub_url, hub_token=hub_token, workspace_root=workspace_root)
+        _windows_install_runner(
+            hub_url=hub_url,
+            hub_token=hub_token,
+            workspace_root=workspace_root,
+            hub_ssh_host=hub_ssh_host,
+            hub_ssh_user=hub_ssh_user,
+            hub_ssh_key_file=hub_ssh_key_file,
+            hub_service_name=hub_service_name,
+            hub_healthz_url=hub_healthz_url,
+            no_hub_watchdog=no_hub_watchdog,
+        )
     elif sys.platform.startswith("linux"):
         _linux_install_unit("forgewire-runner.service", "forgewire-runner.service")
     elif sys.platform == "darwin":

@@ -28,7 +28,19 @@ param(
     [int]$MaxConcurrent = 1,
     [string]$DataDir = "C:\ProgramData\forgewire",
     [string]$ServiceName = "ForgeWireRunner",
-    [switch]$NoWatchdog
+    [switch]$NoWatchdog,
+    # ---- Cross-host hub failover (OOTB) ---------------------------------
+    # When -HubSshHost + -HubSshUser + -HubSshKeyFile are supplied, the
+    # installer also stages the hub watchdog on THIS machine, so any node
+    # in the fabric can restart a wedged hub on a peer over SSH. The key
+    # file is copied to a SYSTEM-readable location under DataDir; we never
+    # leave it where the runner service account could read it.
+    [string]$HubSshHost       = "",
+    [string]$HubSshUser       = "",
+    [string]$HubSshKeyFile    = "",
+    [string]$HubServiceName   = "ForgeWireHub",
+    [string]$HubHealthzUrl    = "",
+    [switch]$NoHubWatchdog
 )
 
 $ErrorActionPreference = "Stop"
@@ -167,5 +179,82 @@ if (-not $NoWatchdog) {
         }
     } else {
         Write-Warning "install-runner-watchdog.ps1 not found alongside this script ($watchdog); skipping watchdog install."
+    }
+}
+
+# ---- Cross-host hub watchdog (OOTB) --------------------------------------
+# Every fabric node carries a hub watchdog so any peer can restart a wedged
+# hub. We chain into install-hub-watchdog.ps1 with SSH params when the
+# operator supplied an SSH target. Key material is staged here so SYSTEM
+# can read it from the scheduled task context (the runner-install caller
+# typically holds the key in $env:USERPROFILE\.ssh\ which is per-user).
+$wantHubWatchdog = $false
+if (-not $NoHubWatchdog) {
+    $sshGiven = [bool]($HubSshHost -or $HubSshUser -or $HubSshKeyFile)
+    if ($sshGiven) {
+        foreach ($pair in @(@('HubSshHost',$HubSshHost), @('HubSshUser',$HubSshUser), @('HubSshKeyFile',$HubSshKeyFile))) {
+            if (-not $pair[1]) {
+                throw "Cross-host hub watchdog requires all of -HubSshHost/-HubSshUser/-HubSshKeyFile. Missing: $($pair[0])."
+            }
+        }
+        if (-not (Test-Path $HubSshKeyFile)) {
+            throw "HubSshKeyFile not found: $HubSshKeyFile"
+        }
+        $wantHubWatchdog = $true
+    }
+}
+
+if ($wantHubWatchdog) {
+    $sshDir = Join-Path $DataDir "ssh"
+    New-Item -ItemType Directory -Force -Path $sshDir | Out-Null
+
+    # Copy the private key into a SYSTEM-readable location with an ACL
+    # restricted to SYSTEM + BUILTIN\Administrators only.
+    $stagedKey = Join-Path $sshDir "hub-restart.ed25519"
+    Copy-Item -Force -Path $HubSshKeyFile -Destination $stagedKey
+    $keyAcl = New-Object System.Security.AccessControl.FileSecurity
+    $keyAcl.SetAccessRuleProtection($true, $false)
+    foreach ($p in @("NT AUTHORITY\SYSTEM", "BUILTIN\Administrators")) {
+        $keyAcl.AddAccessRule((New-Object System.Security.AccessControl.FileSystemAccessRule($p, "FullControl", "Allow")))
+    }
+    Set-Acl -Path $stagedKey -AclObject $keyAcl
+    Write-Host "Staged hub-restart key at $stagedKey (SYSTEM/Administrators only)."
+
+    # Seed known_hosts so the SYSTEM probe doesn't fail the first run on
+    # an interactive accept-new prompt. ssh-keyscan is part of OpenSSH and
+    # ships with Windows 10/Server 2019+.
+    $knownHosts = Join-Path $sshDir "known_hosts"
+    try {
+        $scan = & ssh-keyscan.exe -T 5 -t ed25519,rsa,ecdsa $HubSshHost 2>$null
+        if ($scan) {
+            Set-Content -Path $knownHosts -Value $scan -Encoding ascii
+            Write-Host "Seeded $knownHosts with $HubSshHost host keys."
+        } else {
+            Write-Warning "ssh-keyscan returned no output for $HubSshHost. The first probe will fail StrictHostKeyChecking; preseed $knownHosts manually."
+        }
+    } catch {
+        Write-Warning "ssh-keyscan failed for ${HubSshHost}: $($_.Exception.Message). Preseed $knownHosts manually."
+    }
+
+    # Default the probe URL when the operator didn't override it.
+    $effectiveHealthz = $HubHealthzUrl
+    if (-not $effectiveHealthz) { $effectiveHealthz = ($HubUrl.TrimEnd('/') + "/healthz") }
+
+    $hubWatchdog = Join-Path $PSScriptRoot "install-hub-watchdog.ps1"
+    if (Test-Path $hubWatchdog) {
+        Write-Host ""
+        Write-Host "Installing cross-host hub liveness watchdog scheduled task..."
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $hubWatchdog `
+            -HealthzUrl        $effectiveHealthz `
+            -SshHost           $HubSshHost `
+            -SshUser           $HubSshUser `
+            -SshKeyFile        $stagedKey `
+            -RemoteServiceName $HubServiceName `
+            -KnownHostsFile    $knownHosts
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Hub watchdog install returned exit $LASTEXITCODE; cross-host failover is disabled."
+        }
+    } else {
+        Write-Warning "install-hub-watchdog.ps1 not found alongside this script ($hubWatchdog); skipping hub watchdog install."
     }
 }
