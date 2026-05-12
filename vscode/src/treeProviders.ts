@@ -432,12 +432,15 @@ function runnerProps(r: RunnerInfo, aliases: Record<string, string>): RunnerNode
 // ---------------------------------------------------------------------------
 
 export type TaskNode =
-  | { kind: "task"; task: TaskInfo }
+  | { kind: "group"; group: "agent" | "command"; count: number }
+  | { kind: "task"; task: TaskInfo; parent: "agent" | "command" }
   | { kind: "placeholder"; label: string; icon: string; description?: string };
 
 export class TasksProvider implements vscode.TreeDataProvider<TaskNode> {
   private readonly _onDidChange = new vscode.EventEmitter<TaskNode | undefined | void>();
   readonly onDidChangeTreeData = this._onDidChange.event;
+
+  private cache: { agent: TaskInfo[]; command: TaskInfo[] } = { agent: [], command: [] };
 
   constructor(private readonly client: () => HubClient | undefined) {}
 
@@ -446,39 +449,75 @@ export class TasksProvider implements vscode.TreeDataProvider<TaskNode> {
   }
 
   async getChildren(element?: TaskNode): Promise<TaskNode[]> {
-    if (element) {
+    if (element?.kind === "task" || element?.kind === "placeholder") {
       return [];
     }
     const c = this.client();
     if (!c) {
       return [];
     }
-    try {
-      const tasks = await c.listTasks(50);
-      if (tasks.length === 0) {
+    if (!element) {
+      try {
+        const tasks = await c.listTasks(50);
+        this.cache = bucketTasks(tasks);
+        if (tasks.length === 0) {
+          return [
+            {
+              kind: "placeholder",
+              label: "No tasks yet",
+              description: "dispatch one to see it here",
+              icon: "inbox",
+            },
+          ];
+        }
+        return [
+          { kind: "group", group: "agent", count: this.cache.agent.length },
+          { kind: "group", group: "command", count: this.cache.command.length },
+        ];
+      } catch (err) {
         return [
           {
             kind: "placeholder",
-            label: "No tasks yet",
-            description: "dispatch one to see it here",
-            icon: "inbox",
+            label: "Hub unreachable",
+            description: err instanceof Error ? err.message : String(err),
+            icon: "warning",
           },
         ];
       }
-      return tasks.map((t) => ({ kind: "task" as const, task: t }));
-    } catch (err) {
+    }
+    // element is a group node — return its tasks.
+    const bucket = this.cache[element.group];
+    if (bucket.length === 0) {
       return [
         {
           kind: "placeholder",
-          label: "Hub unreachable",
-          description: err instanceof Error ? err.message : String(err),
-          icon: "warning",
+          label: element.group === "agent" ? "No agent tasks" : "No command tasks",
+          description: undefined,
+          icon: "inbox",
         },
       ];
     }
+    return bucket.map((t) => ({ kind: "task" as const, task: t, parent: element.group }));
   }
 
   getTreeItem(n: TaskNode): vscode.TreeItem {
+    if (n.kind === "group") {
+      const label = n.group === "agent" ? "Agent tasks" : "Command tasks";
+      const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.Expanded);
+      item.id = `taskgroup:${n.group}`;
+      item.description = `${n.count}`;
+      item.iconPath = new vscode.ThemeIcon(
+        n.group === "agent" ? "hubot" : "terminal",
+        new vscode.ThemeColor(n.group === "agent" ? "charts.blue" : "charts.purple")
+      );
+      item.contextValue = `taskgroup.${n.group}`;
+      item.tooltip = new vscode.MarkdownString(
+        n.group === "agent"
+          ? "Sealed briefs for Copilot-Chat agent runners (chatmode + MCP)."
+          : "Shell/script payloads for non-agent (cmd) runners."
+      );
+      return item;
+    }
     if (n.kind === "placeholder") {
       const item = new vscode.TreeItem(n.label, vscode.TreeItemCollapsibleState.None);
       item.description = n.description;
@@ -489,11 +528,12 @@ export class TasksProvider implements vscode.TreeDataProvider<TaskNode> {
     const t = n.task;
     const item = new vscode.TreeItem(`#${t.id}  ${t.title}`, vscode.TreeItemCollapsibleState.None);
     item.id = `task:${t.id}`;
-    item.contextValue = "task";
+    item.contextValue = `task.${n.parent}`;
     item.description = `${t.status} \u00b7 ${t.branch}`;
     item.iconPath = new vscode.ThemeIcon(statusIcon(t.status));
     item.tooltip = new vscode.MarkdownString(
       `**#${t.id} ${t.title}** \`${t.status}\`\n\n` +
+        `- kind: \`${t.kind ?? "agent"}\`\n` +
         `- branch: \`${t.branch}\`\n- base: \`${t.base_commit?.slice(0, 12)}\`\n` +
         `- scope: \`${(t.scope_globs ?? []).join(", ")}\`\n` +
         `- worker: ${t.worker_id ?? "_unassigned_"}\n- created: ${t.created_at ?? "?"}\n` +
@@ -506,6 +546,21 @@ export class TasksProvider implements vscode.TreeDataProvider<TaskNode> {
     };
     return item;
   }
+}
+
+function bucketTasks(tasks: TaskInfo[]): { agent: TaskInfo[]; command: TaskInfo[] } {
+  const agent: TaskInfo[] = [];
+  const command: TaskInfo[] = [];
+  for (const t of tasks) {
+    if (t.kind === "command") {
+      command.push(t);
+    } else {
+      // Default bucket: missing/unknown kind is treated as 'agent' so legacy
+      // tasks predating the taxonomy still appear under the agent group.
+      agent.push(t);
+    }
+  }
+  return { agent, command };
 }
 
 function statusIcon(s: string): string {

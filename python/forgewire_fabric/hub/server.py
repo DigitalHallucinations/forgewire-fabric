@@ -44,7 +44,7 @@ from datetime import datetime, timezone
 from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request, status
@@ -394,6 +394,11 @@ class Blackboard:
             # default). ``extra_hosts`` triggers the M2.5.1 approval
             # gate.
             ("network_egress", "TEXT"),
+            # task kind taxonomy: 'agent' (Copilot-Chat agent runner)
+            # vs 'command' (shell-exec runner). Default 'agent' preserves
+            # backward compat: every pre-existing dispatched task is an
+            # agent task.
+            ("kind", "TEXT NOT NULL DEFAULT 'agent'"),
         ]
         for col, decl in additions:
             if col not in existing:
@@ -1075,7 +1080,10 @@ class Blackboard:
         required_capabilities: list[str] | None = None,
         secrets_needed: list[str] | None = None,
         network_egress: dict[str, Any] | None = None,
+        kind: str = "agent",
     ) -> dict[str, Any]:
+        if kind not in ("agent", "command"):
+            raise ValueError(f"invalid task kind: {kind!r}")
         with self._connect() as conn:
             cur = conn.execute(
                 """
@@ -1084,8 +1092,8 @@ class Blackboard:
                     timeout_minutes, priority, metadata,
                     required_tools, required_tags, tenant, workspace_root,
                     require_base_commit, dispatcher_id, required_capabilities,
-                    secrets_needed, network_egress
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    secrets_needed, network_egress, kind
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 RETURNING id
                 """,
                 (
@@ -1107,6 +1115,7 @@ class Blackboard:
                     json.dumps(required_capabilities or []),
                     json.dumps(secrets_needed or []),
                     json.dumps(network_egress) if network_egress else None,
+                    kind,
                 ),
             )
             row = cur.fetchone()
@@ -1180,6 +1189,7 @@ class Blackboard:
                 WHERE id = (
                     SELECT id FROM tasks
                     WHERE status = 'queued' AND cancel_requested = 0
+                      AND kind = 'agent'
                       AND (required_capabilities IS NULL
                            OR required_capabilities = ''
                            OR required_capabilities = '[]')
@@ -2067,9 +2077,11 @@ class Blackboard:
                 """
                 SELECT * FROM tasks
                 WHERE status = 'queued' AND cancel_requested = 0
+                  AND kind = ?
                 ORDER BY priority DESC, id ASC
                 LIMIT 50
                 """,
+                (_runner_kind_from_tags(tags),),
             ).fetchall()
             if not rows:
                 return None, info
@@ -2242,6 +2254,23 @@ def _runner_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     return record
 
 
+def _runner_kind_from_tags(tags: list[str] | None) -> str:
+    """Derive a runner's task-kind affinity from its advertised tags.
+
+    A runner that advertises ``kind:command`` (or ``kind=command``) is a
+    shell-exec runner and claims only ``kind='command'`` tasks. All
+    other runners default to ``'agent'`` so existing Copilot-Chat agent
+    runners keep their pre-taxonomy behaviour.
+    """
+    for raw in tags or []:
+        if not isinstance(raw, str):
+            continue
+        norm = raw.strip().lower().replace("=", ":")
+        if norm == "kind:command":
+            return "command"
+    return "agent"
+
+
 def _glob_static_prefix(glob: str) -> str:
     """Return the leading static (wildcard-free) prefix of a glob.
 
@@ -2322,6 +2351,12 @@ class DispatchTaskRequest(BaseModel):
     tenant: str | None = None
     workspace_root: str | None = None
     require_base_commit: bool = False
+    # Task routing class. ``'agent'`` (default) targets agent runners
+    # (Copilot-Chat window + chatmode + MCP). ``'command'`` targets
+    # shell-exec runners (NSSM ``ForgeWireRunner`` service). The hub
+    # keeps the two queues disjoint so a shell runner cannot
+    # accidentally execute an agent brief (and vice versa).
+    kind: Literal["agent", "command"] = "agent"
     # M2.5.1: when a previous attempt at the same envelope returned 428
     # REQUIRE_APPROVAL, the dispatcher re-POSTs with the approval_id from
     # the issued queue row. The hub validates + consumes it on a match
@@ -2874,6 +2909,7 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             required_capabilities=payload.required_capabilities,
             secrets_needed=payload.secrets_needed,
             network_egress=payload.network_egress,
+            kind=payload.kind,
         )
         _audit_dispatch(
             task,
@@ -3413,6 +3449,7 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             required_capabilities=payload.required_capabilities,
             secrets_needed=payload.secrets_needed,
             network_egress=payload.network_egress,
+            kind=payload.kind,
         )
         _audit_dispatch(
             task,

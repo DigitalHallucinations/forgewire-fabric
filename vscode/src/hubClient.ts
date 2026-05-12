@@ -108,6 +108,7 @@ export interface TaskInfo {
   completed_at?: string | null;
   required_tags?: string[];
   required_tools?: string[];
+  kind?: "agent" | "command";
   result?: { status?: string; log_tail?: string; error?: string | null };
   [key: string]: unknown;
 }
@@ -124,6 +125,7 @@ export interface DispatchPayload {
   required_tags?: string[];
   required_tools?: string[];
   tenant?: string;
+  kind?: "agent" | "command";
 }
 
 export class HubClient {

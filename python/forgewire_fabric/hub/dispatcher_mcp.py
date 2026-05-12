@@ -100,6 +100,17 @@ def _register_tools(registry: ToolRegistry, client: BlackboardClient) -> None:
                         "base_commit before the task is handed out."
                     ),
                 },
+                "kind": {
+                    "type": "string",
+                    "enum": ["agent", "command"],
+                    "default": "agent",
+                    "description": (
+                        "Task routing class. 'agent' (default) targets a "
+                        "Copilot-Chat agent runner; 'command' targets a "
+                        "shell-exec (cmd/script) runner. The hub keeps "
+                        "these queues disjoint."
+                    ),
+                },
             },
         },
         handler=lambda args: client.dispatch_task(args),

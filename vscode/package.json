@@ -531,17 +531,17 @@
         },
         {
           "command": "forgewireFabric.streamTask",
-          "when": "view == forgewireFabric.tasks && viewItem == task",
+          "when": "view == forgewireFabric.tasks && viewItem =~ /^task\\./",
           "group": "inline@1"
         },
         {
           "command": "forgewireFabric.cancelTask",
-          "when": "view == forgewireFabric.tasks && viewItem == task",
+          "when": "view == forgewireFabric.tasks && viewItem =~ /^task\\./",
           "group": "inline@2"
         },
         {
           "command": "forgewireFabric.showTask",
-          "when": "view == forgewireFabric.tasks && viewItem == task"
+          "when": "view == forgewireFabric.tasks && viewItem =~ /^task\\./"
         }
       ],
       "commandPalette": [

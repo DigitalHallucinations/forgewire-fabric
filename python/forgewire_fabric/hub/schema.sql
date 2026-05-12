@@ -29,6 +29,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     branch          TEXT NOT NULL,              -- e.g. agent/optiplex/109-jobs
     timeout_minutes INTEGER NOT NULL DEFAULT 60,
     priority        INTEGER NOT NULL DEFAULT 100,
+    -- kind: routing class for the task.
+    --   'agent'   = sealed brief for a Copilot-Chat agent runner (default).
+    --   'command' = shell/script payload for a non-agent (cmd) runner.
+    -- Hub uses this to keep agent runners and command runners on disjoint queues.
+    kind            TEXT NOT NULL DEFAULT 'agent',
     status          TEXT NOT NULL DEFAULT 'queued',
                     -- queued | claimed | running | reporting | done |
                     -- failed | cancelled | timed_out
