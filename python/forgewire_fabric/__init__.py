@@ -29,7 +29,7 @@ __all__ = [
     "check_runtime_compat",
 ]
 
-__version__ = "0.12.0"
+__version__ = "0.13.0"
 
 # Compat envelope for the ``forgewire-runtime`` (PyO3) wheel. The hub and
 # runner check this at import time and log a loud warning if a mismatching

@@ -5,6 +5,41 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project
 uses [semantic versioning](https://semver.org/spec/v2.0.0.html) for the Python
 package. The VSIX (`vscode/`) is versioned independently.
 
+## [0.13.0] - 2026-05-13
+
+### Added
+
+- **Secret broker end-to-end** on the hub:
+  - `POST /secrets`, `GET /secrets`, `DELETE /secrets/{name}` — auth-gated
+    put/rotate/list/delete. Put-or-rotate is path-collapsed: existing names
+    rotate, new names create. Values are never echoed; list returns metadata
+    only (`name`, `version`, `created_at`, `last_rotated_at`).
+  - Per-task `secrets_needed` column in the tasks schema. Dispatch records
+    the requested secret **names** (never values) in the audit log.
+  - `claim-v2` flow resolves `secrets_needed` against the broker and injects
+    resolved values into the runner-side claim payload.
+  - **Redaction** in `submit_result` / stream-append / progress paths:
+    `log_tail` and `error` fields are scanned for secret values and replaced
+    with `***SECRET:<name>***` markers before persistence.
+  - `BlackboardClient` gained `put_secret`, `rotate_secret`, `list_secrets`,
+    `delete_secret`, `resolve_secrets`.
+  - CLI `forgewire-fabric secrets {put,rotate,list,delete}` group.
+- **Live smoke script** `scripts/live_smoke_secrets.py` covering put → rotate
+  → list-redaction → dispatch-with-secret → submit-with-redaction → cleanup.
+  Validated against the OptiPlex 7050 hub (10.120.81.95:8765) on 2026-05-13.
+
+### Internal
+
+- `tests/hub/test_secret_broker.py` — 21 tests covering put/rotate/delete
+  semantics, redaction substring matching, name-only audit recording,
+  unknown-secret rejection at claim time, and version monotonicity.
+- Full suite: **208 passed, 12 skipped** (0.12.0 baseline: 71 passed; the
+  delta reflects expanded coverage across secret broker + adjacent paths
+  that were previously thinner).
+- `ops(install): resync bundled nssm-install-runner.ps1 with canonical script`
+  — drift caught by `test_installer_assets_in_sync`; bundled installer asset
+  now matches `scripts/install/nssm-install-runner.ps1` at commit `7a2b346`.
+
 ## [0.12.0] - 2026-05-13
 
 ### Added
