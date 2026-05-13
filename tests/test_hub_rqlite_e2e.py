@@ -133,9 +133,7 @@ def _labels_snapshot():
             r.raise_for_status()
             res = r.json()["results"][0]
             cols = res.get("columns", [])
-            rows = [
-                dict(zip(cols, v)) for v in res.get("values", []) or []
-            ]
+            rows = [dict(zip(cols, v, strict=False)) for v in res.get("values", []) or []]
         except Exception:  # noqa: BLE001
             rows = []
     yield rows

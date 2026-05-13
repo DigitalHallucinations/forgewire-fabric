@@ -195,7 +195,7 @@ def test_default_identity_path_honors_env_override(
     override = tmp_path / "machine" / "runner_identity.json"
     mod = _reload_identity_module(monkeypatch, override)
     try:
-        assert mod.DEFAULT_IDENTITY_PATH == override
+        assert override == mod.DEFAULT_IDENTITY_PATH
         ident = mod.load_or_create()
         assert override.exists()
         again = mod.load_or_create()

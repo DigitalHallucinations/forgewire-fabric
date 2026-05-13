@@ -833,7 +833,7 @@ def test_labels_cli_export_import_round_trip(
             json={"name": "old-hub"},
             headers=_auth(),
         )
-        for rid, alias in zip(runner_ids, ["alpha", "beta"]):
+        for rid, alias in zip(runner_ids, ["alpha", "beta"], strict=True):
             client.put(
                 f"/labels/runners/{rid}",
                 json={"alias": alias},

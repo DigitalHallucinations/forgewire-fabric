@@ -41,7 +41,7 @@ import sys
 import time
 import uuid
 import calendar
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -714,7 +714,7 @@ class Blackboard:
             payload = self.get_labels()
             envelope = {
                 "schema": "forgewire-labels-export/1",
-                "exported_at": datetime.now(timezone.utc).isoformat(),
+                "exported_at": datetime.now(UTC).isoformat(),
                 "labels": payload,
             }
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -1064,7 +1064,7 @@ class Blackboard:
                 row["event_id_hash"] if row is not None else self.AUDIT_GENESIS_HASH
             )
             event_hash = self._audit_event_hash(prev_hash, kind, payload)
-            created_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            created_at = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
             conn.execute(
                 """
                 INSERT INTO audit_event (

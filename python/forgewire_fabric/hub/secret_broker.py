@@ -48,7 +48,6 @@ Mocking policy: there is none. Tests use real AES-GCM against
 from __future__ import annotations
 
 import base64
-import json
 import logging
 import os
 import secrets as _stdlib_secrets
@@ -56,7 +55,8 @@ import sqlite3
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Protocol
+from collections.abc import Callable
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM

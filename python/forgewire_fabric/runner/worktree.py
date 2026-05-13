@@ -33,7 +33,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
+from collections.abc import Iterable, Sequence
 
 TASK_FILE_NAME = "forgewire_task.json"
 _LEGACY_TASK_FILE_NAME = "phrenforge_task.json"

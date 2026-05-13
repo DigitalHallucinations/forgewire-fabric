@@ -121,7 +121,7 @@ class Row(Sequence[Any]):
         return self._columns
 
     def __repr__(self) -> str:
-        pairs = ", ".join(f"{c}={v!r}" for c, v in zip(self._columns, self._values))
+        pairs = ", ".join(f"{c}={v!r}" for c, v in zip(self._columns, self._values, strict=True))
         return f"<Row {pairs}>"
 
 

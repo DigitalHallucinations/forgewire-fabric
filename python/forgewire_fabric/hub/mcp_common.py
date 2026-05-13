@@ -9,7 +9,8 @@ Centralises:
 from __future__ import annotations
 
 import json
-from typing import Any, Callable, Awaitable
+from typing import Any
+from collections.abc import Callable, Awaitable
 
 from mcp.server import Server
 from mcp.types import TextContent, Tool

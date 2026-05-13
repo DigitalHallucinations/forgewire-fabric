@@ -9,7 +9,6 @@ when many threads call ``append_stream`` simultaneously.
 from __future__ import annotations
 
 import importlib
-import os
 import sqlite3
 import threading
 from pathlib import Path

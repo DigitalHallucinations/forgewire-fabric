@@ -12,7 +12,8 @@ Lineage: Stage C.2 of the forgewire-runtime extraction (formerly PhrenForge todo
 from __future__ import annotations
 
 import os
-from typing import Any, Mapping, Sequence
+from typing import Any
+from collections.abc import Mapping, Sequence
 
 __all__ = ["HAS_RUST", "pick_task", "glob_static_prefix", "scopes_within"]
 
@@ -51,10 +52,7 @@ def glob_static_prefix(glob: str) -> str:
         if idx != -1 and idx < cut:
             cut = idx
     head = norm[:cut]
-    if "/" in head:
-        head = head.rsplit("/", 1)[0] + "/"
-    else:
-        head = ""
+    head = head.rsplit("/", 1)[0] + "/" if "/" in head else ""
     return head
 
 

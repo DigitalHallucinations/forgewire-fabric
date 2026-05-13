@@ -96,9 +96,8 @@ def test_broker_put_bumps_version_on_overwrite(tmp_path: Path) -> None:
 
 def test_broker_rotate_requires_existing(tmp_path: Path) -> None:
     broker, db = _broker(tmp_path)
-    with _conn(db) as conn:
-        with pytest.raises(KeyError):
-            broker.rotate(conn, name="NOPE", value="v1", now_iso=_now_iso())
+    with _conn(db) as conn, pytest.raises(KeyError):
+        broker.rotate(conn, name="NOPE", value="v1", now_iso=_now_iso())
 
 
 def test_broker_rotate_sets_last_rotated(tmp_path: Path) -> None:
@@ -165,9 +164,8 @@ def test_broker_tampered_ciphertext_raises(tmp_path: Path) -> None:
         tampered = _b64.b64encode(bytes(blob)).decode("ascii")
         conn.execute("UPDATE secrets SET ciphertext = ? WHERE name = ?", (tampered, "GUARDED"))
         conn.commit()
-    with _conn(db) as conn:
-        with pytest.raises(PermissionError):
-            broker.resolve(conn, names=["GUARDED"])
+    with _conn(db) as conn, pytest.raises(PermissionError):
+        broker.resolve(conn, names=["GUARDED"])
 
 
 def test_broker_wrong_master_key_fails_decrypt(tmp_path: Path) -> None:
@@ -177,9 +175,8 @@ def test_broker_wrong_master_key_fails_decrypt(tmp_path: Path) -> None:
         conn.commit()
     # New broker pointed at a fresh, unrelated key file.
     other = SecretBroker(FileKeyProvider(path=tmp_path / "other.key"))
-    with _conn(db) as conn:
-        with pytest.raises(PermissionError):
-            other.resolve(conn, names=["ENC"])
+    with _conn(db) as conn, pytest.raises(PermissionError):
+        other.resolve(conn, names=["ENC"])
 
 
 def test_broker_redact_replaces_values_and_skips_when_empty(tmp_path: Path) -> None:

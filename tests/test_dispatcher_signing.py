@@ -12,7 +12,6 @@ import secrets
 import time
 from pathlib import Path
 
-import pytest
 from fastapi.testclient import TestClient
 
 from forgewire_fabric.dispatcher.identity import DispatcherIdentity, load_or_create

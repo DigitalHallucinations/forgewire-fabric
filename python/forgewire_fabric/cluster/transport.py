@@ -18,7 +18,7 @@ built on top of these primitives.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Awaitable, Callable
+from collections.abc import Awaitable, Callable
 
 from forgewire_fabric.cluster.protocol import (
     DEFAULT_IDEMPOTENCY_TTL_SECONDS,

@@ -14,15 +14,15 @@ from typing import Any
 
 import pytest
 
+from forgewire_fabric.hub import _router as router_mod
+from forgewire_fabric.hub._router import _py_pick_task
+
 # Skip the whole module if the Rust extension isn't built.
 forgewire_runtime = pytest.importorskip("forgewire_runtime")
 if not getattr(forgewire_runtime, "HAS_RUST", False) or not hasattr(
     forgewire_runtime, "pick_task"
 ):
     pytest.skip("forgewire_runtime.pick_task not available", allow_module_level=True)
-
-from forgewire_fabric.hub import _router as router_mod
-from forgewire_fabric.hub._router import _py_pick_task
 
 
 def _rust_pick(tasks: list[dict[str, Any]], runner: dict[str, Any]) -> tuple[int | None, int]:

@@ -24,7 +24,7 @@ from __future__ import annotations
 import fnmatch
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import Enum, StrEnum
 from typing import Any
 
 
@@ -33,7 +33,7 @@ from typing import Any
 # ---------------------------------------------------------------------------
 
 
-class IntentKind(str, Enum):
+class IntentKind(StrEnum):
     FS_WRITE = "fs_write"
     NETWORK_EGRESS = "network_egress"
     SHELL_EXEC = "shell_exec"
@@ -81,7 +81,7 @@ class CompletionRequest:
 # ---------------------------------------------------------------------------
 
 
-class DecisionKind(str, Enum):
+class DecisionKind(StrEnum):
     ALLOW = "allow"
     REQUIRE_APPROVAL = "require_approval"
     DENY = "deny"
@@ -296,25 +296,12 @@ class FabricPolicyEngine:
             and self.policy.workspace_required_for_shell
             and intent.workspace_root is not None
             and intent.command is not None
+            and any(_path_outside(p, intent.workspace_root) for p in intent.paths)
         ):
             # Heuristic: if any path argument escapes workspace_root, gate it.
-            if any(_path_outside(p, intent.workspace_root) for p in intent.paths):
-                if intent.kind in self.policy.require_approval:
-                    return PolicyDecision(
-                        decision=DecisionKind.REQUIRE_APPROVAL,
-                        violations=(
-                            PolicyViolation(
-                                rule="shell_exec_outside_workspace",
-                                value=intent.workspace_root,
-                                observed=list(intent.paths),
-                                message="shell touches paths outside workspace",
-                            ),
-                        ),
-                        rule_name="shell_exec_outside_workspace",
-                        reason="shell exec outside workspace requires approval",
-                    )
+            if intent.kind in self.policy.require_approval:
                 return PolicyDecision(
-                    decision=DecisionKind.DENY,
+                    decision=DecisionKind.REQUIRE_APPROVAL,
                     violations=(
                         PolicyViolation(
                             rule="shell_exec_outside_workspace",
@@ -324,24 +311,40 @@ class FabricPolicyEngine:
                         ),
                     ),
                     rule_name="shell_exec_outside_workspace",
-                    reason="shell exec outside workspace",
+                    reason="shell exec outside workspace requires approval",
                 )
-
-        if intent.kind in (IntentKind.MERGE, IntentKind.PUSH) and intent.branch is not None:
-            if self._branch_is_protected(intent.branch):
-                return PolicyDecision(
-                    decision=DecisionKind.REQUIRE_APPROVAL,
-                    violations=(
-                        PolicyViolation(
-                            rule="protected_branches",
-                            value=list(self.policy.protected_branches),
-                            observed=intent.branch,
-                            message=f"{intent.kind.value} to protected branch {intent.branch!r}",
-                        ),
+            return PolicyDecision(
+                decision=DecisionKind.DENY,
+                violations=(
+                    PolicyViolation(
+                        rule="shell_exec_outside_workspace",
+                        value=intent.workspace_root,
+                        observed=list(intent.paths),
+                        message="shell touches paths outside workspace",
                     ),
-                    rule_name="protected_branches",
-                    reason=f"{intent.kind.value} to protected branch requires approval",
-                )
+                ),
+                rule_name="shell_exec_outside_workspace",
+                reason="shell exec outside workspace",
+            )
+
+        if (
+            intent.kind in (IntentKind.MERGE, IntentKind.PUSH)
+            and intent.branch is not None
+            and self._branch_is_protected(intent.branch)
+        ):
+            return PolicyDecision(
+                decision=DecisionKind.REQUIRE_APPROVAL,
+                violations=(
+                    PolicyViolation(
+                        rule="protected_branches",
+                        value=list(self.policy.protected_branches),
+                        observed=intent.branch,
+                        message=f"{intent.kind.value} to protected branch {intent.branch!r}",
+                    ),
+                ),
+                rule_name="protected_branches",
+                reason=f"{intent.kind.value} to protected branch requires approval",
+            )
 
         if intent.kind in self.policy.require_approval:
             return PolicyDecision(
@@ -430,7 +433,7 @@ def load_policy_yaml(path: str) -> FabricPolicy:
 
     import yaml  # local import: avoid hard dep at import time
 
-    with open(path, "r", encoding="utf-8") as fh:
+    with open(path, encoding="utf-8") as fh:
         raw = yaml.safe_load(fh) or {}
     if not isinstance(raw, Mapping):
         raise ValueError(f"policy file {path!r} must be a YAML mapping at the top level")
@@ -468,10 +471,7 @@ def _match_parts(path_parts: list[str], glob_parts: list[str]) -> bool:
     if head == "**":
         if not rest:
             return True
-        for index in range(len(path_parts) + 1):
-            if _match_parts(path_parts[index:], rest):
-                return True
-        return False
+        return any(_match_parts(path_parts[index:], rest) for index in range(len(path_parts) + 1))
     if not path_parts:
         return False
     if fnmatch.fnmatchcase(path_parts[0], head):

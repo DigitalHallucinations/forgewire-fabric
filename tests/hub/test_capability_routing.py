@@ -13,16 +13,14 @@ Mocking policy: none. Real hub, real on-disk SQLite.
 
 from __future__ import annotations
 
-import json
 import secrets
 import tempfile
 import time
 from pathlib import Path
 
-import pytest
 from fastapi.testclient import TestClient
 
-from forgewire_fabric.hub.capability_matcher import match, parse, evaluate, resolve
+from forgewire_fabric.hub.capability_matcher import match
 from forgewire_fabric.hub.server import BlackboardConfig, create_app
 from forgewire_fabric.runner.identity import load_or_create
 from forgewire_fabric.runner.runner_capabilities import sign_payload

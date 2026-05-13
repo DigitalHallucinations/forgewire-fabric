@@ -27,7 +27,7 @@ import time
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from typing import Any
 
 from .engine import (
@@ -388,7 +388,7 @@ def _today() -> str:
 
 
 def _to_day(ts: float) -> str:
-    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d")
+    return datetime.fromtimestamp(ts, tz=UTC).strftime("%Y-%m-%d")
 
 
 def _opt_float(value: Any) -> float | None:

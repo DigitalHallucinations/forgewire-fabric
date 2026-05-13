@@ -30,7 +30,8 @@ import logging
 import os
 import sys
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any
+from collections.abc import Awaitable, Callable
 
 from forgewire_fabric.hub.client import (
     BlackboardClient,
@@ -361,7 +362,7 @@ async def _heartbeat_loop(session: RunnerSession, *, stop: asyncio.Event) -> Non
         try:
             await asyncio.wait_for(stop.wait(), timeout=HEARTBEAT_INTERVAL_SECONDS)
             return
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
         try:
             await session.client.heartbeat(session.runner_id, session.heartbeat_payload())
@@ -383,7 +384,7 @@ async def _heartbeat_loop(session: RunnerSession, *, stop: asyncio.Event) -> Non
 async def _sleep_or_stop(stop: asyncio.Event, seconds: float) -> None:
     try:
         await asyncio.wait_for(stop.wait(), timeout=seconds)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         pass
 
 
@@ -449,11 +450,11 @@ async def _claim_loop(
 
 async def run_runner(
     *,
-    config: Optional[RunnerConfig] = None,
-    client: Optional[BlackboardClient] = None,
-    executor: Optional[TaskExecutor] = None,
-    stop_event: Optional[asyncio.Event] = None,
-    identity: Optional[RunnerIdentity] = None,
+    config: RunnerConfig | None = None,
+    client: BlackboardClient | None = None,
+    executor: TaskExecutor | None = None,
+    stop_event: asyncio.Event | None = None,
+    identity: RunnerIdentity | None = None,
 ) -> None:
     """Run the registration + heartbeat + claim loops until ``stop_event`` fires."""
     cfg = config or RunnerConfig.from_env()

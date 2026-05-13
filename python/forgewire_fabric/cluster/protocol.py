@@ -20,7 +20,8 @@ from __future__ import annotations
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any
+from collections.abc import Mapping
 
 DEFAULT_IDEMPOTENCY_TTL_SECONDS: float = 60.0
 

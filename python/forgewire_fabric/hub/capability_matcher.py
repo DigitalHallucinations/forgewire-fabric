@@ -44,7 +44,8 @@ Design notes
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping
+from typing import Any
+from collections.abc import Iterable, Mapping
 
 
 _OPS = ("==", "!=", ">=", "<=", ">", "<", "~=", " in ")
@@ -122,7 +123,7 @@ def resolve(caps: Mapping[str, Any], path: str) -> Any:
     """
     cur: Any = caps
     parts = [p for p in path.split(".") if p]
-    for i, part in enumerate(parts):
+    for part in parts:
         if isinstance(cur, Mapping):
             cur = cur.get(part)
         elif isinstance(cur, list):

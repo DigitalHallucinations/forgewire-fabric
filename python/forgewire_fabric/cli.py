@@ -363,7 +363,7 @@ def hub_demote(peers: tuple[str, ...], token_file: str | None, skip_push: bool) 
     from forgewire_fabric.install import uninstall_hub
 
     token = _load_token_for_probe(token_file)
-    local_url = f"http://127.0.0.1:8765"
+    local_url = "http://127.0.0.1:8765"
 
     async def _drain_all() -> None:
         async with _BC(local_url, token) as c:
@@ -943,12 +943,11 @@ def setup(
             )
 
     # --- hub url resolution ----------------------------------------------
-    if install_role_runner:
-        if not hub_url:
-            if install_role_hub:
-                hub_url = f"http://127.0.0.1:{port}"
-            else:
-                raise SystemExit("Runner role requires --hub-url.")
+    if install_role_runner and not hub_url:
+        if install_role_hub:
+            hub_url = f"http://127.0.0.1:{port}"
+        else:
+            raise SystemExit("Runner role requires --hub-url.")
 
     # --- workspace --------------------------------------------------------
     if install_role_runner and not workspace_root:

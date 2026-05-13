@@ -227,7 +227,7 @@ def _gpu_label() -> str | None:
                 stderr=subprocess.DEVNULL,
                 timeout=5,
             )
-            names = [l.strip() for l in out.splitlines() if l.strip() and l.strip() != "Name"]
+            names = [line.strip() for line in out.splitlines() if line.strip() and line.strip() != "Name"]
             if names:
                 return names[0][:120]
         except (subprocess.SubprocessError, FileNotFoundError, OSError):

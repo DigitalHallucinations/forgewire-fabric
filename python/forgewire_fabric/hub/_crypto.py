@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Mapping
+from typing import Any
+from collections.abc import Mapping
 
 __all__ = [
     "HAS_RUST",
