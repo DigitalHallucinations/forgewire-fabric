@@ -965,7 +965,7 @@ export class HostsProvider implements vscode.TreeDataProvider<HostsNode> {
       item.id = `hosts:host:${n.cluster}:${host.hostname}`;
       const isLocal = host.hostname.toLowerCase() === os.hostname().toLowerCase();
       const rawHost = label === host.hostname ? "" : `${host.hostname} \u00b7 `;
-      item.description = rawHost + hostDescription(host) + (isLocal ? " \u00b7 this host" : "");
+      item.description = rawHost + hostStatusBadge(host) + (isLocal ? " \u00b7 this host" : "");
       item.iconPath = new vscode.ThemeIcon(
         "device-desktop",
         host.is_active_hub ? new vscode.ThemeColor("charts.green") : isLocal ? new vscode.ThemeColor("charts.blue") : undefined
@@ -1034,16 +1034,29 @@ function hostDisplayName(host: HostSummary): string {
   return (host.display_name || host.label || host.hostname).trim() || host.hostname;
 }
 
-function hostDescription(host: HostSummary): string {
+function hostStatusBadge(host: HostSummary): string {
+  // Reduce the per-role status matrix to a single badge for the row.
+  // Detailed metadata (hub/ctrl/cmd/agent/dispatch statuses) lives in the
+  // expanded children, not crammed into the row label.
   const r = host.roles;
-  const pieces = [
-    `hub:${r.hub_head.status}`,
-    `ctrl:${r.control.status}`,
-    `cmd:${r.command_runner.status}`,
-    `agent:${r.agent_runner.status}`,
-    `dispatch:${r.dispatch.status}`,
-  ];
-  return pieces.join(" + ");
+  const roles: HostRoleSummary[] = [r.hub_head, r.control, r.dispatch, r.command_runner, r.agent_runner];
+  const enabled = roles.filter((role) => role.enabled);
+  if (enabled.length === 0) return "idle";
+  const healthy = new Set(["active", "online", "master", "slave", "registered", "ok", "ready"]);
+  const bad = new Set(["offline", "failed", "error", "unreachable", "stopped"]);
+  let hasBad = false;
+  let hasUnknown = false;
+  for (const role of enabled) {
+    const s = (role.status || "").toLowerCase();
+    if (bad.has(s)) {
+      hasBad = true;
+    } else if (!healthy.has(s)) {
+      hasUnknown = true;
+    }
+  }
+  if (hasBad) return "degraded";
+  if (hasUnknown) return "degraded";
+  return "online";
 }
 
 function hostTooltip(host: HostSummary): vscode.MarkdownString {

@@ -16,12 +16,12 @@ $leaf = Split-Path -Leaf $VsixPath
 $remotePath = (Join-Path $RemoteUserHome $leaf) -replace '/', '\\'
 $scpTarget = "${RemoteHost}:/" + ($remotePath -replace '\\', '/')
 
-Write-Host "Copying $leaf -> $RemoteHost:$remotePath"
+Write-Host "Copying $leaf -> ${RemoteHost}:${remotePath}"
 & scp $VsixPath $scpTarget
 if ($LASTEXITCODE -ne 0) { throw "scp failed with exit $LASTEXITCODE" }
 
 $cmd = "`"$RemoteCodeCli`" --install-extension `"$remotePath`" --force"
-Write-Host "Installing on $RemoteHost: $cmd"
+Write-Host "Installing on ${RemoteHost}: $cmd"
 & ssh $RemoteHost $cmd
 if ($LASTEXITCODE -ne 0) { throw "remote install failed with exit $LASTEXITCODE" }
 
