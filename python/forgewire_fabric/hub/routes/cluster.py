@@ -26,6 +26,9 @@ def healthz(request: Request) -> dict[str, Any]:
     return {
         "status": "ok",
         "version": request.app.version,
+        # Explicit alias so clients (VSIX, dispatcher) don't have to guess
+        # whether "version" is the package, the API surface, or the protocol.
+        "package_version": request.app.version,
         "protocol_version": PROTOCOL_VERSION,
         "rust_crypto": _HUB_CRYPTO_HAS_RUST,
         "rust_router": _HUB_ROUTER_HAS_RUST,
