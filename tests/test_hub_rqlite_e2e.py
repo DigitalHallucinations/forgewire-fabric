@@ -14,9 +14,10 @@ the only cluster most developers have. To make that safe we:
 
 * Never ``DROP TABLE`` or ``DELETE FROM`` shared hub tables.
 * Generate per-test unique identifiers (UUIDs) so dispatcher /
-  worker / task rows added by tests never collide with operator
-  state. Test rows linger as harmless artefacts; the alternative
-  (table wipe) wiped operator-set ``labels`` rows in production.
+    worker / task rows added by tests never collide with operator
+    state. Host-visible test rows use the ``test-host-`` prefix and
+    are deleted surgically after the run; the alternative (table wipe)
+    wiped operator-set ``labels`` rows in production.
 * For tests that must mutate fabric-wide singletons (the
   ``labels`` table), snapshot the live state at session start and
   restore it at session end.
@@ -44,6 +45,7 @@ from forgewire_fabric.hub.server import BlackboardConfig, create_app
 RQLITE_HOST = os.environ.get("RQLITE_HOST", "127.0.0.1")
 RQLITE_PORT = int(os.environ.get("RQLITE_PORT", "4001"))
 HUB_TOKEN = "test-hub-token-rqlite-aaaaaaaaaaa"
+TEST_HOST_PREFIX = "test-host-"
 
 
 def _cluster_reachable() -> bool:
@@ -65,6 +67,40 @@ pytestmark = pytest.mark.skipif(
     not _cluster_reachable(),
     reason=f"rqlite cluster {RQLITE_HOST}:{RQLITE_PORT} not reachable",
 )
+
+
+def _execute_rqlite(statements: list[list]) -> None:
+    if not statements:
+        return
+    with httpx.Client(
+        base_url=f"http://{RQLITE_HOST}:{RQLITE_PORT}",
+        timeout=10.0,
+        follow_redirects=True,
+    ) as c:
+        c.post("/db/execute", json=statements).raise_for_status()
+
+
+def _cleanup_test_hosts() -> None:
+    statements = [
+        [
+            "DELETE FROM dispatchers WHERE hostname = ? OR hostname LIKE ?",
+            "test-host",
+            f"{TEST_HOST_PREFIX}%",
+        ],
+        [
+            "DELETE FROM host_roles WHERE hostname = ? OR hostname LIKE ?",
+            "test-host",
+            f"{TEST_HOST_PREFIX}%",
+        ],
+    ]
+    _execute_rqlite(statements)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _host_surface_cleanup():
+    _cleanup_test_hosts()
+    yield
+    _cleanup_test_hosts()
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -140,8 +176,7 @@ def _labels_snapshot():
         for k in live_keys:
             if k not in captured_keys:
                 statements.append(["DELETE FROM labels WHERE key = ?", k])
-        if statements:
-            c.post("/db/execute", json=statements).raise_for_status()
+        _execute_rqlite(statements)
 
 
 def _make_app(tmp_path: Path, *, require_signed: bool = False):
@@ -191,7 +226,7 @@ def _sign_register(ident: DispatcherIdentity) -> dict:
         "dispatcher_id": ident.dispatcher_id,
         "public_key": ident.public_key_hex,
         "label": ident.label,
-        "hostname": "test-host",
+        "hostname": f"{TEST_HOST_PREFIX}{ident.dispatcher_id[:8]}",
         "timestamp": ts,
         "nonce": nonce,
         "signature": ident.sign(_canonical(body)),
@@ -349,7 +384,7 @@ def test_claim_next_task_v2_cas_under_rqlite(tmp_path):
             "/tasks/claim",
             json={
                 "worker_id": "test-worker-1",
-                "hostname": "test-host",
+                "hostname": f"{TEST_HOST_PREFIX}{uuid.uuid4().hex[:8]}",
                 "capabilities": {"tools": ["python"]},
             },
             headers=_auth(),
@@ -366,7 +401,7 @@ def test_claim_next_task_v2_cas_under_rqlite(tmp_path):
 
 
 def test_labels_round_trip_under_rqlite(tmp_path):
-    """Parity: ``labels`` (hub_name + runner_alias:<runner_id>) must
+    """Parity: ``labels`` (hub_name + runner/host aliases) must
     persist through the rqlite write path the same way it does under
     sqlite. ``_upsert_label`` uses ``BEGIN IMMEDIATE`` + a single
     DELETE-or-INSERT statement + commit, which is the rqlite-safe
@@ -375,12 +410,14 @@ def test_labels_round_trip_under_rqlite(tmp_path):
     regress.
 
     Non-destructive: uses UUID-suffixed alias keys so it never
-    collides with operator-set runner aliases, and snapshots +
+    collides with operator-set runner or host aliases, and snapshots +
     restores ``hub_name`` around its own mutation so the live
     cluster's operator-set hub name is preserved.
     """
     rid_a = f"rid-test-{uuid.uuid4().hex}"
     rid_b = f"rid-test-{uuid.uuid4().hex}"
+    host_a = f"{TEST_HOST_PREFIX}{uuid.uuid4().hex[:8]}"
+    host_b = f"{TEST_HOST_PREFIX}{uuid.uuid4().hex[:8]}"
     test_hub_name_a = f"rqlite-parity-{uuid.uuid4().hex[:6]}"
     test_hub_name_b = f"rqlite-parity-{uuid.uuid4().hex[:6]}"
 
@@ -396,6 +433,9 @@ def test_labels_round_trip_under_rqlite(tmp_path):
         existing_aliases = r.json()["runner_aliases"]
         assert rid_a not in existing_aliases
         assert rid_b not in existing_aliases
+        existing_host_aliases = r.json().get("host_aliases", {})
+        assert host_a not in existing_host_aliases
+        assert host_b not in existing_host_aliases
 
         try:
             # Set hub_name -- single INSERT path.
@@ -426,6 +466,20 @@ def test_labels_round_trip_under_rqlite(tmp_path):
             )
             assert r.status_code == 200
 
+            # Per-host aliases (machine labels).
+            r = client.put(
+                f"/labels/hosts/{host_a}",
+                json={"alias": "Host Alpha"},
+                headers=_auth(),
+            )
+            assert r.status_code == 200
+            r = client.put(
+                f"/labels/hosts/{host_b}",
+                json={"alias": "Host Bravo"},
+                headers=_auth(),
+            )
+            assert r.status_code == 200
+
             # Read everything back; rqlite's strong-consistency read must see
             # our rows.
             r = client.get("/labels", headers=_auth())
@@ -433,10 +487,19 @@ def test_labels_round_trip_under_rqlite(tmp_path):
             assert body["hub_name"] == test_hub_name_b
             assert body["runner_aliases"].get(rid_a) == "Alpha"
             assert body["runner_aliases"].get(rid_b) == "Bravo"
+            assert body["host_aliases"].get(host_a) == "Host Alpha"
+            assert body["host_aliases"].get(host_b) == "Host Bravo"
 
-            # Clear one alias -- DELETE path. The other test row must remain.
+            # Clear one runner alias and one host alias -- DELETE path. The
+            # other test rows must remain.
             r = client.put(
                 f"/labels/runners/{rid_a}",
+                json={"alias": ""},
+                headers=_auth(),
+            )
+            assert r.status_code == 200
+            r = client.put(
+                f"/labels/hosts/{host_a}",
                 json={"alias": ""},
                 headers=_auth(),
             )
@@ -445,6 +508,8 @@ def test_labels_round_trip_under_rqlite(tmp_path):
             body = r.json()
             assert rid_a not in body["runner_aliases"]
             assert body["runner_aliases"].get(rid_b) == "Bravo"
+            assert host_a not in body["host_aliases"]
+            assert body["host_aliases"].get(host_b) == "Host Bravo"
         finally:
             # Restore operator state.
             client.put(
@@ -455,6 +520,12 @@ def test_labels_round_trip_under_rqlite(tmp_path):
             for rid in (rid_a, rid_b):
                 client.put(
                     f"/labels/runners/{rid}",
+                    json={"alias": ""},
+                    headers=_auth(),
+                )
+            for hostname in (host_a, host_b):
+                client.put(
+                    f"/labels/hosts/{hostname}",
                     json={"alias": ""},
                     headers=_auth(),
                 )
