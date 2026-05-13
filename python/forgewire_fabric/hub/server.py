@@ -580,6 +580,7 @@ class Blackboard:
             rows = conn.execute("SELECT key, value FROM labels").fetchall()
         hub_name = ""
         aliases: dict[str, str] = {}
+        host_aliases: dict[str, str] = {}
         for r in rows:
             k = r["key"]
             v = r["value"]
@@ -587,7 +588,13 @@ class Blackboard:
                 hub_name = v
             elif k.startswith("runner_alias:"):
                 aliases[k[len("runner_alias:") :]] = v
-        return {"hub_name": hub_name, "runner_aliases": aliases}
+            elif k.startswith("host_alias:"):
+                host_aliases[k[len("host_alias:") :]] = v
+        return {
+            "hub_name": hub_name,
+            "runner_aliases": aliases,
+            "host_aliases": host_aliases,
+        }
 
     def set_hub_name(self, name: str, *, updated_by: str | None = None) -> None:
         self._upsert_label("hub_name", name, updated_by)
@@ -600,6 +607,17 @@ class Blackboard:
         updated_by: str | None = None,
     ) -> None:
         self._upsert_label(f"runner_alias:{runner_id}", alias, updated_by)
+
+    def set_host_alias(
+        self,
+        hostname: str,
+        alias: str,
+        *,
+        updated_by: str | None = None,
+    ) -> None:
+        self._upsert_label(
+            f"host_alias:{_normalize_hostname(hostname)}", alias, updated_by
+        )
 
     def _upsert_label(self, key: str, value: str, updated_by: str | None) -> None:
         with self._connect() as conn:
@@ -737,7 +755,9 @@ class Blackboard:
             #   * a reimaged host that restored only the DB from backup.
             live = self.get_labels()
             has_state = bool(
-                live.get("hub_name") or live.get("runner_aliases")
+                live.get("hub_name")
+                or live.get("runner_aliases")
+                or live.get("host_aliases")
             )
             if has_state:
                 self._write_labels_snapshot()
@@ -745,7 +765,11 @@ class Blackboard:
                     "status": "seeded_from_db",
                     "path": str(path),
                     "applied": 0,
-                    "seeded_keys": 1 + len(live.get("runner_aliases") or {}),
+                    "seeded_keys": (
+                        (1 if live.get("hub_name") else 0)
+                        + len(live.get("runner_aliases") or {})
+                        + len(live.get("host_aliases") or {})
+                    ),
                 }
             return {"status": "absent", "path": str(path), "applied": 0}
         try:
@@ -789,6 +813,12 @@ class Blackboard:
                 "labels snapshot runner_aliases is not an object at %s", path
             )
             return {"status": "invalid", "path": str(path), "applied": 0}
+        host_aliases = payload.get("host_aliases") or {}
+        if not isinstance(host_aliases, dict):
+            LOGGER.warning(
+                "labels snapshot host_aliases is not an object at %s", path
+            )
+            return {"status": "invalid", "path": str(path), "applied": 0}
         applied = 0
         self._suppress_snapshot_writeback = True
         try:
@@ -801,6 +831,13 @@ class Blackboard:
                     "labels-snapshot",
                 )
                 applied += 1
+            for hostname, alias in host_aliases.items():
+                self._upsert_label(
+                    f"host_alias:{_normalize_hostname(hostname)}",
+                    str(alias),
+                    "labels-snapshot",
+                )
+                applied += 1
         finally:
             self._suppress_snapshot_writeback = False
         return {
@@ -809,6 +846,7 @@ class Blackboard:
             "applied": applied,
             "hub_name": hub_name,
             "alias_count": len(aliases),
+            "host_alias_count": len(host_aliases),
         }
 
     # ------------------------------------------------------------ approvals
@@ -2438,8 +2476,14 @@ def _build_host_summaries(
     host_roles: list[dict[str, Any]],
     active_hub_hostname: str,
     active_hub_address: str,
+    host_aliases: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     active_hub_hostname = _normalize_hostname(active_hub_hostname)
+    normalized_host_aliases = {
+        _normalize_hostname(hostname): str(alias)
+        for hostname, alias in (host_aliases or {}).items()
+        if str(alias)
+    }
     hostnames: set[str] = {active_hub_hostname}
     runners_by_host: dict[str, list[dict[str, Any]]] = {}
     dispatchers_by_host: dict[str, list[dict[str, Any]]] = {}
@@ -2463,6 +2507,11 @@ def _build_host_summaries(
         host_dispatchers = dispatchers_by_host.get(hostname, [])
         stored = role_rows_by_host.get(hostname, {})
         roles: dict[str, dict[str, Any]] = {}
+        runner_alias = next(
+            (str(r.get("alias")) for r in host_runners if str(r.get("alias") or "")),
+            "",
+        )
+        host_label = normalized_host_aliases.get(hostname) or runner_alias
 
         is_active_hub = hostname.lower() == active_hub_hostname.lower()
         roles["hub_head"] = _role_summary(
@@ -2515,6 +2564,8 @@ def _build_host_summaries(
         hosts.append(
             {
                 "hostname": hostname,
+                "label": host_label,
+                "display_name": host_label or hostname,
                 "is_active_hub": is_active_hub,
                 "roles": roles,
                 "runners": host_runners,
@@ -3634,13 +3685,17 @@ def create_app(config: BlackboardConfig) -> FastAPI:
         labels = blackboard.get_labels()
         runners = blackboard.list_runners()
         aliases = labels.get("runner_aliases") or {}
+        host_aliases = labels.get("host_aliases") or {}
         for runner in runners:
-            runner["alias"] = aliases.get(runner.get("runner_id"), "")
+            hostname = _normalize_hostname(runner.get("hostname"))
+            runner["host_alias"] = host_aliases.get(hostname, "")
+            runner["alias"] = aliases.get(runner.get("runner_id"), "") or runner["host_alias"]
         active_address = str(request.base_url).rstrip("/")
         hosts = _build_host_summaries(
             runners=runners,
             dispatchers=blackboard.list_dispatchers(),
             host_roles=blackboard.list_host_roles(),
+            host_aliases=host_aliases,
             active_hub_hostname=socket.gethostname(),
             active_hub_address=active_address,
         )
@@ -3894,9 +3949,12 @@ def create_app(config: BlackboardConfig) -> FastAPI:
         # merge them in here at the read boundary.
         labels = blackboard.get_labels()
         aliases = labels.get("runner_aliases") or {}
+        host_aliases = labels.get("host_aliases") or {}
         runners = blackboard.list_runners()
         for r in runners:
-            r["alias"] = aliases.get(r.get("runner_id"), "")
+            hostname = _normalize_hostname(r.get("hostname"))
+            r["host_alias"] = host_aliases.get(hostname, "")
+            r["alias"] = aliases.get(r.get("runner_id"), "") or r["host_alias"]
         return {
             "hub_protocol_version": PROTOCOL_VERSION,
             "hub_name": labels.get("hub_name", ""),
@@ -3924,6 +3982,15 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             raise HTTPException(status_code=400, detail="runner alias max 80 chars")
         updated_by = str(payload.get("updated_by", "") or "")[:80] or None
         blackboard.set_runner_alias(runner_id, alias, updated_by=updated_by)
+        return blackboard.get_labels()
+
+    @app.put("/labels/hosts/{hostname}", dependencies=[Depends(require_auth)])
+    def set_host_label(hostname: str, payload: dict[str, Any]) -> dict[str, Any]:
+        alias = str(payload.get("alias", "")).strip()
+        if len(alias) > 80:
+            raise HTTPException(status_code=400, detail="host alias max 80 chars")
+        updated_by = str(payload.get("updated_by", "") or "")[:80] or None
+        blackboard.set_host_alias(hostname, alias, updated_by=updated_by)
         return blackboard.get_labels()
 
     @app.post("/runners/{runner_id}/heartbeat", dependencies=[Depends(require_auth)])

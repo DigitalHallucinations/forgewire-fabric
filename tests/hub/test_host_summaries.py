@@ -131,6 +131,8 @@ def test_hosts_summary_fuses_roles_runners_dispatchers_and_active_hub(tmp_path: 
         assert active["roles"]["control"]["status"] == "master"
 
         summary = hosts[host]
+        assert summary["label"] == ""
+        assert summary["display_name"] == host
         assert summary["roles"]["command_runner"]["enabled"] is True
         assert summary["roles"]["command_runner"]["status"] == "online"
         assert summary["roles"]["command_runner"]["runner_ids"] == [command_runner_id]
@@ -140,6 +142,50 @@ def test_hosts_summary_fuses_roles_runners_dispatchers_and_active_hub(tmp_path: 
         assert summary["roles"]["dispatch"]["enabled"] is True
         assert summary["roles"]["dispatch"]["status"] == "registered"
         assert summary["roles"]["dispatch"]["dispatcher_ids"] == [dispatcher_id]
+
+
+def test_hosts_summary_uses_host_alias_with_runner_alias_fallback(tmp_path: Path) -> None:
+    app = _make_app(tmp_path)
+    with TestClient(app) as client:
+        host_a = "HOST-A"
+        host_b = "HOST-B"
+        runner_a = _register_runner(client, tmp_path, hostname=host_a, tags=["kind:command"])
+        runner_b = _register_runner(client, tmp_path, hostname=host_b, tags=["kind:command"])
+
+        r = client.put(
+            f"/labels/runners/{runner_a}",
+            json={"alias": "Legacy runner label"},
+            headers=_auth(),
+        )
+        assert r.status_code == 200, r.text
+        r = client.put(
+            f"/labels/runners/{runner_b}",
+            json={"alias": "Runner fallback"},
+            headers=_auth(),
+        )
+        assert r.status_code == 200, r.text
+        r = client.put(
+            f"/labels/hosts/{host_a}",
+            json={"alias": "Precision 5520"},
+            headers=_auth(),
+        )
+        assert r.status_code == 200, r.text
+
+        r = client.get("/hosts", headers=_auth())
+        assert r.status_code == 200, r.text
+        hosts = {h["hostname"]: h for h in r.json()["hosts"]}
+        assert hosts[host_a]["label"] == "Precision 5520"
+        assert hosts[host_a]["display_name"] == "Precision 5520"
+        assert hosts[host_b]["label"] == "Runner fallback"
+        assert hosts[host_b]["display_name"] == "Runner fallback"
+
+        r = client.get("/runners", headers=_auth())
+        assert r.status_code == 200, r.text
+        runners = {row["runner_id"]: row for row in r.json()["runners"]}
+        assert runners[runner_a]["host_alias"] == "Precision 5520"
+        assert runners[runner_a]["alias"] == "Legacy runner label"
+        assert runners[runner_b]["host_alias"] == ""
+        assert runners[runner_b]["alias"] == "Runner fallback"
 
 
 def test_host_role_report_requires_auth(tmp_path: Path) -> None:

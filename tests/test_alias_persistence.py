@@ -272,6 +272,11 @@ def test_labels_snapshot_writethrough_on_every_label_change(
     assert after_hub["schema"] == "forgewire-labels-export/1"
     assert after_hub["labels"]["hub_name"] == "Test hub 1"
     assert after_hub["labels"]["runner_aliases"] == {}
+    assert after_hub["labels"]["host_aliases"] == {}
+
+    bb.set_host_alias("HOST-A", "Precision 5520")
+    after_host_alias = json.loads(snap.read_text(encoding="utf-8"))
+    assert after_host_alias["labels"]["host_aliases"] == {"HOST-A": "Precision 5520"}
 
     bb.set_runner_alias("rid-A", "Alpha")
     after_alias = json.loads(snap.read_text(encoding="utf-8"))
@@ -280,6 +285,7 @@ def test_labels_snapshot_writethrough_on_every_label_change(
     bb.set_runner_alias("rid-A", "")  # clear
     after_clear = json.loads(snap.read_text(encoding="utf-8"))
     assert after_clear["labels"]["runner_aliases"] == {}
+    assert after_clear["labels"]["host_aliases"] == {"HOST-A": "Precision 5520"}
     assert after_clear["labels"]["hub_name"] == "Test hub 1"
 
 
@@ -294,6 +300,7 @@ def test_labels_snapshot_restore_re_applies_after_table_wipe(
     db_path = tmp_path / "hub.sqlite3"
     bb = Blackboard(db_path)
     bb.set_hub_name("Test hub 1")
+    bb.set_host_alias("HOST-A", "Precision 5520")
     bb.set_runner_alias("rid-A", "Pecision 5520")
     bb.set_runner_alias("rid-B", "Optiplex 7050t")
 
@@ -301,13 +308,14 @@ def test_labels_snapshot_restore_re_applies_after_table_wipe(
     with bb._connect() as conn:
         conn.execute("DELETE FROM labels")
         conn.commit()
-    assert bb.get_labels() == {"hub_name": "", "runner_aliases": {}}
+    assert bb.get_labels() == {"hub_name": "", "runner_aliases": {}, "host_aliases": {}}
 
     report = bb.restore_labels_from_snapshot()
     assert report["status"] == "applied"
-    assert report["applied"] == 3  # hub_name + 2 aliases
+    assert report["applied"] == 4  # hub_name + 2 runner aliases + 1 host alias
     assert bb.get_labels() == {
         "hub_name": "Test hub 1",
+        "host_aliases": {"HOST-A": "Precision 5520"},
         "runner_aliases": {
             "rid-A": "Pecision 5520",
             "rid-B": "Optiplex 7050t",
@@ -333,6 +341,7 @@ def test_create_app_auto_restores_labels_snapshot_on_startup(
                 "schema": "forgewire-labels-export/1",
                 "labels": {
                     "hub_name": "Test hub 1",
+                    "host_aliases": {"HOST-A": "Precision 5520"},
                     "runner_aliases": {
                         "rid-A": "Pecision 5520",
                         "rid-B": "Optiplex 7050t",
@@ -348,6 +357,7 @@ def test_create_app_auto_restores_labels_snapshot_on_startup(
         assert r.status_code == 200, r.text
         assert r.json() == {
             "hub_name": "Test hub 1",
+            "host_aliases": {"HOST-A": "Precision 5520"},
             "runner_aliases": {
                 "rid-A": "Pecision 5520",
                 "rid-B": "Optiplex 7050t",
@@ -356,7 +366,7 @@ def test_create_app_auto_restores_labels_snapshot_on_startup(
     # The startup report is surfaced on app.state for log/inspection.
     report = app.state.labels_snapshot_report
     assert report["status"] == "applied"
-    assert report["applied"] == 3
+    assert report["applied"] == 4
 
 
 def test_labels_snapshot_absent_is_noop(tmp_path: Path) -> None:
@@ -391,6 +401,7 @@ def test_labels_snapshot_seeds_from_db_when_sidecar_missing(
     # state a freshly-upgraded production hub is in on first boot.
     bb_seed = Blackboard(cfg.db_path, labels_snapshot_path=Path(""))
     bb_seed.set_hub_name("Test hub 1")
+    bb_seed.set_host_alias("HOST-A", "Precision 5520")
     bb_seed.set_runner_alias("rid-A", "Pecision 5520")
     assert not snap.exists()
     # Now boot the app the way the service supervisor does. Restore
@@ -398,11 +409,12 @@ def test_labels_snapshot_seeds_from_db_when_sidecar_missing(
     app = create_app(cfg)
     report = app.state.labels_snapshot_report
     assert report["status"] == "seeded_from_db"
-    assert report["seeded_keys"] == 2  # hub_name + 1 alias
+    assert report["seeded_keys"] == 3  # hub_name + 1 host alias + 1 runner alias
     assert snap.exists()
     payload = json.loads(snap.read_text(encoding="utf-8"))
     assert payload["labels"] == {
         "hub_name": "Test hub 1",
+        "host_aliases": {"HOST-A": "Precision 5520"},
         "runner_aliases": {"rid-A": "Pecision 5520"},
     }
     # And labels are still readable through the API.
@@ -471,6 +483,7 @@ def test_labels_snapshot_tolerates_bare_payload(tmp_path: Path) -> None:
     assert report["status"] == "applied"
     assert bb.get_labels() == {
         "hub_name": "bare-ok",
+        "host_aliases": {},
         "runner_aliases": {"rid-X": "X"},
     }
 
@@ -826,6 +839,11 @@ def test_labels_cli_export_import_round_trip(
                 json={"alias": alias},
                 headers=_auth(),
             )
+        client.put(
+            "/labels/hosts/HOST-A",
+            json={"alias": "Precision"},
+            headers=_auth(),
+        )
 
         # Run ``labels export`` against this in-memory hub by emulating
         # what the CLI does internally: GET /labels, wrap it in the
@@ -884,6 +902,22 @@ def test_labels_cli_export_import_round_trip(
                     headers=_auth(),
                 ).json()
 
+            async def set_host_alias(
+                self,
+                hostname: str,
+                alias: str,
+                *,
+                updated_by: str | None = None,
+            ) -> dict[str, Any]:
+                payload: dict[str, Any] = {"alias": alias}
+                if updated_by:
+                    payload["updated_by"] = updated_by
+                return client2.put(
+                    f"/labels/hosts/{hostname}",
+                    json=payload,
+                    headers=_auth(),
+                ).json()
+
         monkeypatch.setattr(cli_mod, "_client", lambda: _Proxy())
         runner = CliRunner()
         result = runner.invoke(
@@ -896,6 +930,7 @@ def test_labels_cli_export_import_round_trip(
             runner_ids[0]: "alpha",
             runner_ids[1]: "beta",
         }
+        assert body["host_aliases"] == {"HOST-A": "Precision"}
 
 
 def test_labels_cli_import_rejects_unknown_schema(tmp_path: Path) -> None:
@@ -904,7 +939,7 @@ def test_labels_cli_import_rejects_unknown_schema(tmp_path: Path) -> None:
         json.dumps(
             {
                 "schema": "from-the-future/9",
-                "labels": {"hub_name": "x", "runner_aliases": {}},
+                "labels": {"hub_name": "x", "runner_aliases": {}, "host_aliases": {}},
             }
         ),
         encoding="utf-8",
@@ -927,6 +962,7 @@ def test_labels_cli_import_accepts_bare_payload(
         json.dumps(
             {
                 "hub_name": "bare-hub",
+                "host_aliases": {"HOST-A": "Precision"},
                 "runner_aliases": {
                     "55555555-5555-5555-5555-555555555555": "bare-alias"
                 },
@@ -965,6 +1001,19 @@ def test_labels_cli_import_accepts_bare_payload(
                     headers=_auth(),
                 ).json()
 
+            async def set_host_alias(
+                self,
+                hostname: str,
+                alias: str,
+                *,
+                updated_by: str | None = None,
+            ) -> dict[str, Any]:
+                return client.put(
+                    f"/labels/hosts/{hostname}",
+                    json={"alias": alias},
+                    headers=_auth(),
+                ).json()
+
         monkeypatch.setattr(cli_mod, "_client", lambda: _Proxy())
         runner = CliRunner()
         result = runner.invoke(cli_mod.cli, ["labels", "import", str(bare_path)])
@@ -974,6 +1023,7 @@ def test_labels_cli_import_accepts_bare_payload(
         assert body["runner_aliases"] == {
             "55555555-5555-5555-5555-555555555555": "bare-alias"
         }
+        assert body["host_aliases"] == {"HOST-A": "Precision"}
 
 
 # ---------------------------------------------------------------------------

@@ -28,6 +28,7 @@ export interface RunnerInfo {
   tenant?: string;
   poll_interval?: number;
   alias?: string;
+  host_alias?: string;
   [key: string]: unknown;
 }
 
@@ -102,6 +103,8 @@ export interface HostRoleSummary {
 
 export interface HostSummary {
   hostname: string;
+  label?: string;
+  display_name?: string;
   is_active_hub: boolean;
   roles: Record<HostRoleName, HostRoleSummary>;
   runners: RunnerInfo[];
@@ -111,6 +114,7 @@ export interface HostSummary {
 export interface LabelsInfo {
   hub_name: string;
   runner_aliases: Record<string, string>;
+  host_aliases: Record<string, string>;
 }
 
 export interface TaskInfo {
@@ -254,7 +258,7 @@ export class HubClient {
     try {
       return await this.request<LabelsInfo>("GET", "/labels");
     } catch {
-      return { hub_name: "", runner_aliases: {} };
+      return { hub_name: "", runner_aliases: {}, host_aliases: {} };
     }
   }
 
@@ -264,6 +268,13 @@ export class HubClient {
 
   async setRunnerAlias(runnerId: string, alias: string, updatedBy?: string): Promise<void> {
     await this.request("PUT", `/labels/runners/${encodeURIComponent(runnerId)}`, {
+      alias,
+      updated_by: updatedBy ?? "",
+    });
+  }
+
+  async setHostAlias(hostname: string, alias: string, updatedBy?: string): Promise<void> {
+    await this.request("PUT", `/labels/hosts/${encodeURIComponent(hostname)}`, {
       alias,
       updated_by: updatedBy ?? "",
     });

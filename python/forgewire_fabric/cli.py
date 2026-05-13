@@ -1519,10 +1519,12 @@ def hosts_set_role(hostname: str, role: str, enabled: bool, status: str | None, 
 
 
 # ---------------------------------------------------------------------------
-# labels  --  fabric-wide cosmetic state (hub_name + per-runner aliases).
+# labels  --  fabric-wide cosmetic state (hub_name + machine aliases).
 #
-# Aliases live in the hub's ``labels`` table, keyed by
-# ``runner_alias:<runner_id>``. They are durable by design:
+# Aliases live in the hub's ``labels`` table, keyed by either
+# ``host_alias:<hostname>`` for machine labels or the legacy
+# ``runner_alias:<runner_id>`` for runner-identity labels. They are durable
+# by design:
 #
 #   * **Updates** (code redeploy, hub restart) -- table is sqlite-backed.
 #   * **Upgrades** (schema bumps) -- ``CREATE TABLE IF NOT EXISTS labels``
@@ -1538,7 +1540,7 @@ def hosts_set_role(hostname: str, role: str, enabled: bool, status: str | None, 
 # ---------------------------------------------------------------------------
 
 
-@cli.group("labels", help="Fabric-wide labels (hub name + runner aliases).")
+@cli.group("labels", help="Fabric-wide labels (hub name + machine aliases).")
 def labels_group() -> None:
     pass
 
@@ -1564,8 +1566,43 @@ def labels_set_hub_name(name: str, updated_by: str | None) -> None:
 
 
 @labels_group.command(
+    "set-host-alias",
+    help="Persist a friendly label for a hostname/machine.",
+)
+@click.argument("hostname")
+@click.argument("alias")
+@click.option("--updated-by", default=None, help="Operator handle for the audit trail.")
+def labels_set_host_alias(
+    hostname: str, alias: str, updated_by: str | None
+) -> None:
+    async def _go() -> None:
+        async with _client() as c:
+            _print_json(
+                await c.set_host_alias(hostname, alias, updated_by=updated_by)
+            )
+
+    _async(_go())
+
+
+@labels_group.command(
+    "clear-host-alias",
+    help="Remove a host label. Empty-string upsert deletes the row hub-side.",
+)
+@click.argument("hostname")
+@click.option("--updated-by", default=None)
+def labels_clear_host_alias(hostname: str, updated_by: str | None) -> None:
+    async def _go() -> None:
+        async with _client() as c:
+            _print_json(
+                await c.set_host_alias(hostname, "", updated_by=updated_by)
+            )
+
+    _async(_go())
+
+
+@labels_group.command(
     "set-runner-alias",
-    help="Persist a friendly alias for a runner_id (keyed independently of the runners table).",
+    help="Persist a legacy friendly alias for a runner_id.",
 )
 @click.argument("runner_id")
 @click.argument("alias")
@@ -1626,6 +1663,7 @@ def labels_export(output: str | None) -> None:
                     "exported_to": output,
                     "hub_name": payload.get("hub_name", ""),
                     "alias_count": len(payload.get("runner_aliases") or {}),
+                    "host_alias_count": len(payload.get("host_aliases") or {}),
                 }
             )
         else:
@@ -1638,7 +1676,7 @@ def labels_export(output: str | None) -> None:
     "import",
     help=(
         "Restore a previously-exported labels payload to the hub. Each "
-        "row is upserted via PUT /labels/{hub,runners/{id}} so the call "
+        "row is upserted via PUT /labels/{hub,hosts/{name},runners/{id}} so the call "
         "is idempotent. Empty values delete the corresponding row."
     ),
 )
@@ -1652,7 +1690,7 @@ def labels_import(source: str, updated_by: str | None) -> None:
             raise click.ClickException(f"unknown labels schema {schema!r}")
         payload = data["labels"]
     else:
-        # Tolerate a bare {hub_name, runner_aliases} blob.
+        # Tolerate a bare {hub_name, runner_aliases, host_aliases} blob.
         payload = data
     if not isinstance(payload, dict):
         raise click.ClickException("labels payload must be a JSON object")
@@ -1660,12 +1698,20 @@ def labels_import(source: str, updated_by: str | None) -> None:
     aliases = payload.get("runner_aliases") or {}
     if not isinstance(aliases, dict):
         raise click.ClickException("runner_aliases must be an object")
+    host_aliases = payload.get("host_aliases") or {}
+    if not isinstance(host_aliases, dict):
+        raise click.ClickException("host_aliases must be an object")
 
     async def _go() -> None:
-        applied = {"hub_name": False, "aliases": 0}
+        applied = {"hub_name": False, "aliases": 0, "host_aliases": 0}
         async with _client() as c:
             await c.set_hub_name(hub_name, updated_by=updated_by)
             applied["hub_name"] = True
+            for hostname, alias in host_aliases.items():
+                await c.set_host_alias(
+                    str(hostname), str(alias), updated_by=updated_by
+                )
+                applied["host_aliases"] += 1
             for runner_id, alias in aliases.items():
                 await c.set_runner_alias(
                     str(runner_id), str(alias), updated_by=updated_by

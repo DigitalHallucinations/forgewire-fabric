@@ -2,7 +2,7 @@
   "name": "forgewire-fabric",
   "displayName": "ForgeWire Fabric",
   "description": "Dispatch tasks to a ForgeWire Fabric compute mesh: signed envelopes, scope-bound capability tokens, live stream output. Run a hub or runner from inside VS Code on Windows, macOS, or Linux.",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "publisher": "DigitalHallucinations",
   "license": "Apache-2.0",
   "icon": "media/icon.png",
@@ -234,8 +234,14 @@
         "icon": "$(edit)"
       },
       {
+        "command": "forgewireFabric.renameHost",
+        "title": "Rename Host…",
+        "category": "ForgeWire Fabric",
+        "icon": "$(edit)"
+      },
+      {
         "command": "forgewireFabric.renameRunner",
-        "title": "Rename Runner…",
+        "title": "Rename Runner Alias…",
         "category": "ForgeWire Fabric",
         "icon": "$(edit)"
       },
@@ -478,9 +484,14 @@
           "group": "inline@1"
         },
         {
+          "command": "forgewireFabric.renameHost",
+          "when": "view == forgewireFabric.hosts && viewItem =~ /^hosts\\.host\\./",
+          "group": "inline@1"
+        },
+        {
           "command": "forgewireFabric.renameRunner",
           "when": "view == forgewireFabric.hosts && viewItem =~ /^runner\\./",
-          "group": "inline@1"
+          "group": "inline@1.5"
         },
         {
           "command": "forgewireFabric.pauseRunner",

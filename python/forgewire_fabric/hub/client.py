@@ -186,7 +186,7 @@ class BlackboardClient:
 
     # -- labels (cosmetic, fabric-wide) ----------------------------------
     async def get_labels(self) -> dict[str, Any]:
-        """Return the hub label payload: ``{hub_name, runner_aliases}``."""
+        """Return the hub label payload: ``{hub_name, runner_aliases, host_aliases}``."""
         result = await self._request("GET", "/labels")
         assert result is not None
         return result
@@ -218,6 +218,19 @@ class BlackboardClient:
             payload["updated_by"] = updated_by
         result = await self._request(
             "PUT", f"/labels/runners/{runner_id}", json=payload
+        )
+        assert result is not None
+        return result
+
+    async def set_host_alias(
+        self, hostname: str, alias: str, *, updated_by: str | None = None
+    ) -> dict[str, Any]:
+        """Persist a fabric-wide friendly label for a host/machine."""
+        payload: dict[str, Any] = {"alias": alias}
+        if updated_by:
+            payload["updated_by"] = updated_by
+        result = await self._request(
+            "PUT", f"/labels/hosts/{hostname}", json=payload
         )
         assert result is not None
         return result

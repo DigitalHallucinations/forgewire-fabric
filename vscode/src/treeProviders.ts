@@ -281,6 +281,7 @@ export class RunnersProvider implements vscode.TreeDataProvider<RunnerNode> {
   readonly onDidChangeTreeData = this._onDidChange.event;
 
   private aliases: Record<string, string> = {};
+  private hostAliases: Record<string, string> = {};
   private buckets: { agent: RunnerInfo[]; command: RunnerInfo[] } = { agent: [], command: [] };
 
   constructor(private readonly client: () => HubClient | undefined) {}
@@ -334,9 +335,10 @@ export class RunnersProvider implements vscode.TreeDataProvider<RunnerNode> {
     try {
       const [runners, labels] = await Promise.all([
         c.listRunners(),
-        c.getLabels().catch(() => ({ hub_name: "", runner_aliases: {} })),
+        c.getLabels().catch(() => ({ hub_name: "", runner_aliases: {}, host_aliases: {} })),
       ]);
       this.aliases = labels.runner_aliases ?? {};
+      this.hostAliases = labels.host_aliases ?? {};
       this.buckets = { agent: [], command: [] };
       for (const r of runners) {
         this.buckets[bucketRunner(r)].push(r);
@@ -387,7 +389,7 @@ export class RunnersProvider implements vscode.TreeDataProvider<RunnerNode> {
 
     if (n.kind === "runner") {
       const r = n.runner;
-      const alias = this.aliases[r.runner_id];
+      const alias = this.aliases[r.runner_id] || this.hostAliases[r.hostname] || r.host_alias;
       const label = alias || r.hostname || r.runner_id.slice(0, 8);
       const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.Collapsed);
       item.id = `runner:${r.runner_id}`;
@@ -863,10 +865,12 @@ export class HostsProvider implements vscode.TreeDataProvider<HostsNode> {
     }
     if (n.kind === "host") {
       const host = n.host;
-      const item = new vscode.TreeItem(host.hostname, vscode.TreeItemCollapsibleState.Collapsed);
+      const label = hostDisplayName(host);
+      const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.Collapsed);
       item.id = `hosts:host:${n.cluster}:${host.hostname}`;
       const isLocal = host.hostname.toLowerCase() === os.hostname().toLowerCase();
-      item.description = hostDescription(host) + (isLocal ? " \u00b7 this host" : "");
+      const rawHost = label === host.hostname ? "" : `${host.hostname} \u00b7 `;
+      item.description = rawHost + hostDescription(host) + (isLocal ? " \u00b7 this host" : "");
       item.iconPath = new vscode.ThemeIcon(
         "device-desktop",
         host.is_active_hub ? new vscode.ThemeColor("charts.green") : isLocal ? new vscode.ThemeColor("charts.blue") : undefined
@@ -931,6 +935,10 @@ function firstRoleRunner(host: HostSummary, roleName: HostRoleName, role: HostRo
   return host.runners.find((r) => r.runner_id === id);
 }
 
+function hostDisplayName(host: HostSummary): string {
+  return (host.display_name || host.label || host.hostname).trim() || host.hostname;
+}
+
 function hostDescription(host: HostSummary): string {
   const r = host.roles;
   const pieces = [
@@ -944,8 +952,12 @@ function hostDescription(host: HostSummary): string {
 }
 
 function hostTooltip(host: HostSummary): vscode.MarkdownString {
+  const label = hostDisplayName(host);
+  const title = label === host.hostname ? host.hostname : `${label} (${host.hostname})`;
+  const labelLine = label === host.hostname ? "" : `- label: \`${label}\`\n`;
   return new vscode.MarkdownString(
-    `**${host.hostname}**\n\n` +
+    `**${title}**\n\n` +
+      labelLine +
       `- hub head: \`${host.roles.hub_head.status}\`\n` +
       `- control: \`${host.roles.control.status}\`\n` +
       `- dispatch: \`${host.roles.dispatch.status}\`\n` +
@@ -1410,11 +1422,12 @@ export class SecretsProvider implements vscode.TreeDataProvider<SecretNode> {
 }
 
 // ---------------------------------------------------------------------------
-// Labels (cosmetic hub name + per-runner aliases; inline rename)
+// Labels (cosmetic hub name + machine/runner aliases; inline rename)
 // ---------------------------------------------------------------------------
 
 export type LabelNode =
   | { kind: "hub"; name: string }
+  | { kind: "hostAlias"; hostname: string; alias: string }
   | { kind: "alias"; runnerId: string; alias: string }
   | { kind: "placeholder"; label: string; description?: string; icon: string };
 
@@ -1435,14 +1448,17 @@ export class LabelsProvider implements vscode.TreeDataProvider<LabelNode> {
     try {
       const labels = await c.getLabels();
       const nodes: LabelNode[] = [{ kind: "hub", name: labels.hub_name || "" }];
+      for (const [hostname, alias] of Object.entries(labels.host_aliases ?? {})) {
+        nodes.push({ kind: "hostAlias", hostname, alias });
+      }
       for (const [rid, alias] of Object.entries(labels.runner_aliases ?? {})) {
         nodes.push({ kind: "alias", runnerId: rid, alias });
       }
-      if (Object.keys(labels.runner_aliases ?? {}).length === 0) {
+      if (Object.keys(labels.host_aliases ?? {}).length === 0 && Object.keys(labels.runner_aliases ?? {}).length === 0) {
         nodes.push({
           kind: "placeholder",
-          label: "No runner aliases",
-          description: "right-click a runner to set one",
+          label: "No host labels",
+          description: "right-click a host to set one",
           icon: "info",
         });
       }
@@ -1476,7 +1492,17 @@ export class LabelsProvider implements vscode.TreeDataProvider<LabelNode> {
       item.description = n.runnerId.slice(0, 8);
       item.iconPath = new vscode.ThemeIcon("symbol-string");
       item.contextValue = "label.alias";
-      item.tooltip = `Runner ${n.runnerId}\nClick to rename via the Runners view.`;
+      item.tooltip = `Legacy runner alias ${n.runnerId}\nPrefer host labels for machine names.`;
+      return item;
+    }
+    if (n.kind === "hostAlias") {
+      const item = new vscode.TreeItem(n.alias || "(unset)", vscode.TreeItemCollapsibleState.None);
+      item.id = `label:host:${n.hostname}`;
+      item.description = n.hostname;
+      item.iconPath = new vscode.ThemeIcon("device-desktop");
+      item.contextValue = "label.hostAlias";
+      item.command = { command: "forgewireFabric.renameHost", title: "Rename Host", arguments: [n.hostname] };
+      item.tooltip = `Host ${n.hostname}\nClick to rename this host fabric-wide.`;
       return item;
     }
     const item = new vscode.TreeItem(n.label, vscode.TreeItemCollapsibleState.None);

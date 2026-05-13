@@ -89,6 +89,7 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<void> {
     vscode.commands.registerCommand("forgewireFabric.generateToken", generateToken),
     vscode.commands.registerCommand("forgewireFabric.openSettings", openSettings),
     vscode.commands.registerCommand("forgewireFabric.renameHub", renameHub),
+    vscode.commands.registerCommand("forgewireFabric.renameHost", renameHost),
     vscode.commands.registerCommand("forgewireFabric.renameRunner", renameRunner),
     vscode.commands.registerCommand("forgewireFabric.pauseRunner", pauseRunner),
     vscode.commands.registerCommand("forgewireFabric.resumeRunner", resumeRunner),
@@ -688,6 +689,91 @@ async function renameHub(): Promise<void> {
   }
 }
 
+async function renameHost(arg?: unknown): Promise<void> {
+  const c = getClient();
+  if (!c) {
+    vscode.window.showWarningMessage("Connect to a hub first -- host labels are stored on the hub and propagate to all connected nodes.");
+    return;
+  }
+  let hostname: string | undefined;
+  if (typeof arg === "string") {
+    hostname = arg;
+  } else if (arg && typeof arg === "object") {
+    const candidate = arg as Record<string, unknown>;
+    const host = candidate.host as Record<string, unknown> | undefined;
+    hostname = typeof host?.hostname === "string" ? host.hostname : undefined;
+    if (!hostname && typeof candidate.hostname === "string") {
+      hostname = candidate.hostname;
+    }
+  }
+
+  let hosts: Array<{ hostname: string; display_name?: string; label?: string }> = [];
+  try {
+    hosts = await c.listHosts();
+  } catch (err) {
+    vscode.window.showErrorMessage(
+      `Could not list hosts: ${err instanceof Error ? err.message : String(err)}`
+    );
+    return;
+  }
+
+  if (!hostname) {
+    const pick = await vscode.window.showQuickPick(
+      hosts.map((h) => ({
+        label: h.display_name || h.label || h.hostname,
+        description: h.hostname,
+        hostname: h.hostname,
+      })),
+      { title: "Pick a host to rename (fabric-wide)" }
+    );
+    if (!pick) {
+      return;
+    }
+    hostname = pick.hostname;
+  }
+
+  const labels = await c.getLabels().catch(() => ({
+    hub_name: "",
+    runner_aliases: {} as Record<string, string>,
+    host_aliases: {} as Record<string, string>,
+  }));
+  const currentAlias = labels.host_aliases?.[hostname] ?? "";
+  const next = await vscode.window.showInputBox({
+    title: `Label for host ${hostname} (fabric-wide)`,
+    prompt: "Friendly machine name. Leave blank to clear.",
+    value: currentAlias,
+    ignoreFocusOut: true,
+    validateInput: (v) => (v.length <= 80 ? null : "Max 80 chars"),
+  });
+  if (next === undefined) {
+    return;
+  }
+  const trimmed = next.trim();
+  const verb = trimmed === "" ? `clear the label for ${hostname}` : `label ${hostname} as "${trimmed}"`;
+  const ok = await vscode.window.showWarningMessage(
+    `This will ${verb} for every node connected to ${labelForUrl(c.url)}.\n\n` +
+      `The change is stored on the hub and propagates to all clients on their next refresh. Continue?`,
+    { modal: true },
+    "Apply Fabric-Wide"
+  );
+  if (ok !== "Apply Fabric-Wide") {
+    return;
+  }
+  try {
+    await c.setHostAlias(hostname, trimmed, os.hostname());
+    vscode.window.showInformationMessage(
+      trimmed === ""
+        ? `Cleared label for ${hostname} fabric-wide.`
+        : `Labeled ${hostname} as "${trimmed}" fabric-wide.`
+    );
+    refreshAll();
+  } catch (err) {
+    vscode.window.showErrorMessage(
+      `Host rename failed: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+}
+
 async function renameRunner(arg?: { runner_id?: string } | string): Promise<void> {
   const c = getClient();
   if (!c) {
@@ -712,9 +798,16 @@ async function renameRunner(arg?: { runner_id?: string } | string): Promise<void
     );
     return;
   }
-  let labels: Record<string, string> = {};
+  let labels: { runner_aliases: Record<string, string>; host_aliases: Record<string, string> } = {
+    runner_aliases: {},
+    host_aliases: {},
+  };
   try {
-    labels = (await c.getLabels()).runner_aliases ?? {};
+    const payload = await c.getLabels();
+    labels = {
+      runner_aliases: payload.runner_aliases ?? {},
+      host_aliases: payload.host_aliases ?? {},
+    };
   } catch {
     /* ignore */
   }
@@ -722,7 +815,7 @@ async function renameRunner(arg?: { runner_id?: string } | string): Promise<void
   if (!runnerId) {
     const pick = await vscode.window.showQuickPick(
       runners.map((r) => ({
-        label: labels[r.runner_id] || r.hostname || r.runner_id.slice(0, 8),
+        label: labels.runner_aliases[r.runner_id] || labels.host_aliases[r.hostname] || r.hostname || r.runner_id.slice(0, 8),
         description: r.hostname,
         detail: r.runner_id,
         runner_id: r.runner_id,
@@ -740,7 +833,7 @@ async function renameRunner(arg?: { runner_id?: string } | string): Promise<void
   }
 
   const isThisHost = !!runnerHost && runnerHost.toLowerCase() === os.hostname().toLowerCase();
-  const currentAlias = labels[runnerId] ?? "";
+  const currentAlias = labels.runner_aliases[runnerId] ?? "";
   const next = await vscode.window.showInputBox({
     title: `Alias for runner ${runnerHost ?? runnerId.slice(0, 8)} (fabric-wide)`,
     prompt: "Friendly name for this runner. Leave blank to clear.",
@@ -823,11 +916,16 @@ async function pickRunnerIfMissing(arg: unknown): Promise<RunnerArg | undefined>
     );
     return undefined;
   }
-  const labels = await c.getLabels().catch(() => ({ runner_aliases: {} as Record<string, string> }));
+  const labels = await c.getLabels().catch(() => ({
+    hub_name: "",
+    runner_aliases: {} as Record<string, string>,
+    host_aliases: {} as Record<string, string>,
+  }));
   const aliases = labels.runner_aliases ?? {};
+  const hostAliases = labels.host_aliases ?? {};
   const pick = await vscode.window.showQuickPick(
     runners.map((r) => ({
-      label: aliases[r.runner_id ?? ""] || r.hostname || (r.runner_id ?? "").slice(0, 8),
+      label: aliases[r.runner_id ?? ""] || hostAliases[r.hostname ?? ""] || r.hostname || (r.runner_id ?? "").slice(0, 8),
       description: r.hostname,
       detail: `${r.runner_id} \u00b7 ${r.state}`,
       runner: r,
