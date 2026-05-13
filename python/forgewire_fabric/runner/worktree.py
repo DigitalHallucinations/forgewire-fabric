@@ -26,6 +26,7 @@ The task file is small JSON written by ``prepare``::
 from __future__ import annotations
 
 import argparse
+import contextlib
 import fnmatch
 import json
 import os
@@ -206,11 +207,9 @@ def _install_pre_commit_hook(*, worktree: Path) -> None:
         'check-scope --repo "$repo_root" --stdin\n'
     )
     hook_path.write_text(contents, encoding="utf-8")
-    try:
+    # Windows chmod is effectively a no-op; Git for Windows runs hooks via sh.
+    with contextlib.suppress(OSError):
         os.chmod(hook_path, 0o755)
-    except OSError:
-        # Windows: chmod is a no-op effectively; git for windows runs hooks via sh.
-        pass
 
 
 # ---------------------------------------------------------------------------

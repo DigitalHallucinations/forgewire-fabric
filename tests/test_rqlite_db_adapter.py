@@ -11,6 +11,7 @@ and tears it down on teardown.
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import socket
 import uuid
@@ -62,10 +63,8 @@ def temp_table(conn):
     try:
         yield name
     finally:
-        try:
+        with contextlib.suppress(rdb.Error):
             conn.execute(f"DROP TABLE IF EXISTS {name}")
-        except rdb.Error:
-            pass
 
 
 def test_insert_and_select(conn, temp_table):

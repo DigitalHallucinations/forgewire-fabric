@@ -36,6 +36,7 @@ to ``SYSTEM``/Administrators by default.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
@@ -158,12 +159,9 @@ def _atomic_write_identity(target: Path, record: dict[str, str]) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_suffix(target.suffix + f".tmp.{os.getpid()}")
     tmp.write_text(json.dumps(record, indent=2), encoding="utf-8")
-    try:
+    # Windows: chmod is a no-op; ACL inheritance from ProgramData already restricts write.
+    with contextlib.suppress(OSError):
         os.chmod(tmp, 0o600)
-    except OSError:
-        # Windows: chmod is a no-op; ACL inheritance from ProgramData
-        # already restricts write to SYSTEM/Administrators.
-        pass
     os.replace(tmp, target)
 
 
@@ -434,10 +432,8 @@ def save_runner_config_overrides(
         return {}
     tmp = target.with_suffix(target.suffix + f".tmp.{os.getpid()}")
     tmp.write_text(json.dumps(current, indent=2, sort_keys=True), encoding="utf-8")
-    try:
+    with contextlib.suppress(OSError):
         os.chmod(tmp, 0o600)
-    except OSError:
-        pass
     os.replace(tmp, target)
     return current
 
@@ -494,10 +490,8 @@ def export_runner_bundle(
         dst.parent.mkdir(parents=True, exist_ok=True)
         tmp = dst.with_suffix(dst.suffix + f".tmp.{os.getpid()}")
         tmp.write_text(json.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
-        try:
+        with contextlib.suppress(OSError):
             os.chmod(tmp, 0o600)
-        except OSError:
-            pass
         os.replace(tmp, dst)
     return bundle
 
@@ -545,10 +539,8 @@ def import_runner_bundle(
     try:
         ident = import_identity(staging, target=identity_target, force=force)
     finally:
-        try:
+        with contextlib.suppress(OSError):
             staging.unlink()
-        except OSError:
-            pass
     cfg_dst = (
         config_target
         if config_target is not None

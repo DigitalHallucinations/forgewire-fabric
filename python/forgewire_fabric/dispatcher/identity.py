@@ -39,6 +39,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
     Ed25519PublicKey,
 )
+import contextlib
 
 
 DEFAULT_IDENTITY_PATH = Path.home() / ".forgewire" / "dispatcher_identity.json"
@@ -104,10 +105,8 @@ def load_or_create(
         "created_at": _now_iso(),
     }
     target.write_text(json.dumps(record, indent=2), encoding="utf-8")
-    try:
+    with contextlib.suppress(OSError):
         os.chmod(target, 0o600)
-    except OSError:
-        pass
     return DispatcherIdentity(
         dispatcher_id=record["dispatcher_id"],
         public_key_hex=record["public_key"],

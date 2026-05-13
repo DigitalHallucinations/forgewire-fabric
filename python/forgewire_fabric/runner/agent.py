@@ -53,6 +53,7 @@ from forgewire_fabric.runner.runner_capabilities import (
     sample_resources,
     sign_payload,
 )
+import contextlib
 
 LOGGER = logging.getLogger("forgewire_fabric.runner.agent")
 
@@ -382,10 +383,8 @@ async def _heartbeat_loop(session: RunnerSession, *, stop: asyncio.Event) -> Non
 
 
 async def _sleep_or_stop(stop: asyncio.Event, seconds: float) -> None:
-    try:
+    with contextlib.suppress(TimeoutError):
         await asyncio.wait_for(stop.wait(), timeout=seconds)
-    except TimeoutError:
-        pass
 
 
 async def _run_one_task(
@@ -478,10 +477,8 @@ async def run_runner(
         for t in (heartbeat_task, claim_task):
             t.cancel()
         for t in (heartbeat_task, claim_task):
-            try:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await t
-            except (asyncio.CancelledError, Exception):
-                pass
         try:
             await session.client.drain_runner_signed(
                 session.runner_id, session.drain_payload()

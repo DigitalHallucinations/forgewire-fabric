@@ -22,6 +22,7 @@ Connection envs (canonical / legacy):
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import secrets
@@ -375,10 +376,8 @@ def hub_demote(peers: tuple[str, ...], token_file: str | None, skip_push: bool) 
                 rid = r.get("runner_id")
                 if not rid:
                     continue
-                try:
+                with contextlib.suppress(_BE):
                     await c.drain_runner_by_dispatcher(rid)
-                except _BE:
-                    pass
     try:
         _async(_drain_all())
         click.echo("Drained runners.")
@@ -489,10 +488,8 @@ def runner_start(
     try:
         asyncio.set_event_loop(loop)
         for sig in (signal.SIGINT, signal.SIGTERM) if sys.platform != "win32" else (signal.SIGINT,):
-            try:
+            with contextlib.suppress(NotImplementedError):
                 loop.add_signal_handler(sig, _handler)
-            except NotImplementedError:
-                pass
         loop.run_until_complete(run_runner(stop_event=stop))
     finally:
         loop.close()
@@ -856,7 +853,7 @@ def mcp_uninstall() -> None:
     try:
         cur = json.loads(mcp_path.read_text(encoding="utf-8") or "{}")
     except json.JSONDecodeError:
-        raise SystemExit(f"{mcp_path} is not valid JSON; refusing to edit.")
+        raise SystemExit(f"{mcp_path} is not valid JSON; refusing to edit.") from None
     servers = cur.get("servers") or {}
     removed = []
     for k in ("forgewire-dispatcher", "forgewire-runner"):
@@ -1312,7 +1309,10 @@ async def _register_dispatcher_with_client(
         "signature": ident.sign(canonical),
     }
     result = await client.register_dispatcher(payload)
-    try:
+    # Dispatcher registration is the source of truth for signed dispatch.
+    # Host-role reporting is UI enrichment; do not fail dispatch because
+    # an older hub lacks /hosts/roles.
+    with contextlib.suppress(Exception):
         await client.set_host_role(
             {
                 "hostname": hostname,
@@ -1325,11 +1325,6 @@ async def _register_dispatcher_with_client(
                 },
             }
         )
-    except Exception:
-        # Dispatcher registration is the source of truth for signed dispatch.
-        # Host-role reporting is UI enrichment; do not fail dispatch because
-        # an older hub lacks /hosts/roles.
-        pass
     return result
 
 
@@ -1914,10 +1909,8 @@ def approvals_watch(interval: float) -> None:
                     click.echo("---")
                 await asyncio.sleep(interval)
 
-    try:
+    with contextlib.suppress(KeyboardInterrupt):
         _async(_go())
-    except KeyboardInterrupt:
-        pass
 
 
 # ---------------------------------------------------------------------------

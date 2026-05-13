@@ -86,9 +86,7 @@ extend-exclude = ["python/forgewire_fabric/_installer_assets"]
 [tool.ruff.lint]
 select = ["E", "F", "W", "B", "SIM", "UP"]
 ignore = [
-    "B904",
     "E501",
-    "SIM105",
     "UP037",
 ]
 

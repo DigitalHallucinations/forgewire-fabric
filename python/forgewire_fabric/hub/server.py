@@ -1081,10 +1081,8 @@ class Blackboard:
                     created_at,
                 ),
             )
-            try:
+            with contextlib.suppress(Exception):  # rqlite autocommits per request
                 conn.commit()
-            except Exception:  # noqa: BLE001 - rqlite autocommits per request
-                pass
         return {
             "event_id_hash": event_hash,
             "prev_event_id_hash": prev_hash,
@@ -3136,7 +3134,7 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             except httpx.HTTPError as exc:
                 raise HTTPException(
                     status_code=502, detail=f"rqlite unreachable: {exc}"
-                )
+                ) from exc
             return _FResp(
                 content=data,
                 media_type="application/x-sqlite3",
@@ -3157,10 +3155,8 @@ def create_app(config: BlackboardConfig) -> FastAPI:
         with sqlite3.connect(config.db_path) as src:
             src.execute(f"VACUUM INTO '{snap_path.as_posix()}'")
         data = snap_path.read_bytes()
-        try:
+        with contextlib.suppress(OSError):
             snap_path.unlink()
-        except OSError:
-            pass
         return _FResp(
             content=data,
             media_type="application/x-sqlite3",
@@ -3237,7 +3233,7 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             except httpx.HTTPError as exc:
                 raise HTTPException(
                     status_code=502, detail=f"rqlite unreachable: {exc}"
-                )
+                ) from exc
             return {"status": "imported", "bytes": len(body), "backend": "rqlite"}
 
         # Atomic replace: write to .new, fsync, rename.
@@ -3249,7 +3245,7 @@ def create_app(config: BlackboardConfig) -> FastAPI:
                 test.execute("SELECT COUNT(*) FROM tasks").fetchone()
         except sqlite3.DatabaseError as exc:
             new_path.unlink(missing_ok=True)
-            raise HTTPException(status_code=400, detail=f"invalid sqlite blob: {exc}")
+            raise HTTPException(status_code=400, detail=f"invalid sqlite blob: {exc}") from exc
         # Replace under our feet -- existing readers using WAL will reopen.
         os.replace(new_path, config.db_path)
         return {
@@ -3276,32 +3272,37 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             branch=payload.branch,
             approval_id=payload.approval_id,
         )
-        task = blackboard.create_task(
-            title=payload.title,
-            prompt=payload.prompt,
-            scope_globs=payload.scope_globs,
-            base_commit=payload.base_commit,
-            branch=payload.branch,
-            todo_id=payload.todo_id,
-            timeout_minutes=payload.timeout_minutes,
-            priority=payload.priority,
-            metadata=payload.metadata,
-            required_tools=payload.required_tools,
-            required_tags=payload.required_tags,
-            tenant=payload.tenant,
-            workspace_root=payload.workspace_root,
-            require_base_commit=payload.require_base_commit,
-            required_capabilities=payload.required_capabilities,
-            secrets_needed=payload.secrets_needed,
-            network_egress=payload.network_egress,
-            kind=payload.kind,
-        )
-        _audit_dispatch(
-            task,
-            signed=False,
-            dispatcher_id=None,
-            approval_id=payload.approval_id,
-        )
+        try:
+            task = blackboard.create_task(
+                title=payload.title,
+                prompt=payload.prompt,
+                scope_globs=payload.scope_globs,
+                base_commit=payload.base_commit,
+                branch=payload.branch,
+                todo_id=payload.todo_id,
+                timeout_minutes=payload.timeout_minutes,
+                priority=payload.priority,
+                metadata=payload.metadata,
+                required_tools=payload.required_tools,
+                required_tags=payload.required_tags,
+                tenant=payload.tenant,
+                workspace_root=payload.workspace_root,
+                require_base_commit=payload.require_base_commit,
+                required_capabilities=payload.required_capabilities,
+                secrets_needed=payload.secrets_needed,
+                network_egress=payload.network_egress,
+                kind=payload.kind,
+            )
+            _audit_dispatch(
+                task,
+                signed=False,
+                dispatcher_id=None,
+                approval_id=payload.approval_id,
+            )
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                status_code=502, detail=f"rqlite unreachable: {exc}"
+            ) from exc
         return task
 
     @app.get("/tasks", dependencies=[Depends(require_auth)])
@@ -3643,8 +3644,8 @@ def create_app(config: BlackboardConfig) -> FastAPI:
                 approver=payload.approver,
                 reason=payload.reason,
             )
-        except KeyError:
-            raise HTTPException(status_code=404, detail="approval not found")
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="approval not found") from exc
         except PermissionError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -3661,8 +3662,8 @@ def create_app(config: BlackboardConfig) -> FastAPI:
                 approver=payload.approver,
                 reason=payload.reason,
             )
-        except KeyError:
-            raise HTTPException(status_code=404, detail="approval not found")
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="approval not found") from exc
         except PermissionError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -3854,10 +3855,10 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             blackboard.consume_dispatcher_nonce(
                 payload.dispatcher_id, payload.nonce
             )
-        except KeyError:
+        except KeyError as exc:
             raise HTTPException(
                 status_code=404, detail="dispatcher not registered"
-            )
+            ) from exc
         except PermissionError as exc:
             raise HTTPException(status_code=403, detail=str(exc)) from exc
         dispatcher = blackboard.get_dispatcher(payload.dispatcher_id)
@@ -3879,33 +3880,38 @@ def create_app(config: BlackboardConfig) -> FastAPI:
             dispatcher_id=payload.dispatcher_id,
             approval_id=payload.approval_id,
         )
-        task = blackboard.create_task(
-            title=payload.title,
-            prompt=payload.prompt,
-            scope_globs=payload.scope_globs,
-            base_commit=payload.base_commit,
-            branch=payload.branch,
-            todo_id=payload.todo_id,
-            timeout_minutes=payload.timeout_minutes,
-            priority=payload.priority,
-            metadata=payload.metadata,
-            required_tools=payload.required_tools,
-            required_tags=payload.required_tags,
-            tenant=payload.tenant,
-            workspace_root=payload.workspace_root,
-            require_base_commit=payload.require_base_commit,
-            dispatcher_id=payload.dispatcher_id,
-            required_capabilities=payload.required_capabilities,
-            secrets_needed=payload.secrets_needed,
-            network_egress=payload.network_egress,
-            kind=payload.kind,
-        )
-        _audit_dispatch(
-            task,
-            signed=True,
-            dispatcher_id=payload.dispatcher_id,
-            approval_id=payload.approval_id,
-        )
+        try:
+            task = blackboard.create_task(
+                title=payload.title,
+                prompt=payload.prompt,
+                scope_globs=payload.scope_globs,
+                base_commit=payload.base_commit,
+                branch=payload.branch,
+                todo_id=payload.todo_id,
+                timeout_minutes=payload.timeout_minutes,
+                priority=payload.priority,
+                metadata=payload.metadata,
+                required_tools=payload.required_tools,
+                required_tags=payload.required_tags,
+                tenant=payload.tenant,
+                workspace_root=payload.workspace_root,
+                require_base_commit=payload.require_base_commit,
+                dispatcher_id=payload.dispatcher_id,
+                required_capabilities=payload.required_capabilities,
+                secrets_needed=payload.secrets_needed,
+                network_egress=payload.network_egress,
+                kind=payload.kind,
+            )
+            _audit_dispatch(
+                task,
+                signed=True,
+                dispatcher_id=payload.dispatcher_id,
+                approval_id=payload.approval_id,
+            )
+        except httpx.HTTPError as exc:
+            raise HTTPException(
+                status_code=502, detail=f"rqlite unreachable: {exc}"
+            ) from exc
         return task
 
     @app.post("/runners/register", dependencies=[Depends(require_auth)])
