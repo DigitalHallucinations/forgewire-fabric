@@ -10,8 +10,9 @@ import * as os from "os";
 import * as path from "path";
 import * as fs from "fs";
 import * as vscode from "vscode";
-import { HubClient } from "./hubClient";
+import { ApprovalInfo, HubClient } from "./hubClient";
 import {
+  ApprovalNode,
   ApprovalsProvider,
   AuditProvider,
   HostsProvider,
@@ -21,6 +22,7 @@ import {
 } from "./treeProviders";
 
 const SECRET_TOKEN_KEY = "forgewireFabric.hubToken";
+const SNOOZED_APPROVALS_KEY = "forgewireFabric.snoozedApprovals";
 
 let outputChannel: vscode.OutputChannel;
 let statusItem: vscode.StatusBarItem;
@@ -36,6 +38,7 @@ let context: vscode.ExtensionContext;
 // Active hub state: maintained by probeActiveHub() on every refresh tick.
 let activeClient: HubClient | undefined;
 let lastProbe: Awaited<ReturnType<typeof HubClient.probe>> | undefined;
+const snoozedApprovals = new Map<string, SnoozedApproval>();
 
 // ---------------------------------------------------------------------------
 // activation
@@ -53,10 +56,15 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<void> {
 
   // Hydrate token from SecretStorage into the live HubClient lookup.
   await hydrateTokenFromSecret();
+  loadSnoozedApprovals();
 
   hubProvider = new HubProvider(getClient, getProbe);
   hostsProvider = new HostsProvider(getClient);
-  approvalsProvider = new ApprovalsProvider(getClient);
+  approvalsProvider = new ApprovalsProvider(
+    getClient,
+    getSnoozedApproval,
+    approvalAgeBadgeHours
+  );
   auditProvider = new AuditProvider(getClient);
   secretsProvider = new SecretsProvider(getClient);
   tasksProvider = new TasksProvider(getClient);
@@ -81,6 +89,12 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<void> {
     vscode.commands.registerCommand("forgewireFabric.streamTask", streamTaskCmd),
     vscode.commands.registerCommand("forgewireFabric.cancelTask", cancelTaskCmd),
     vscode.commands.registerCommand("forgewireFabric.showTask", showTaskCmd),
+    vscode.commands.registerCommand("forgewireFabric.approveApproval", approveApprovalCmd),
+    vscode.commands.registerCommand("forgewireFabric.denyApproval", denyApprovalCmd),
+    vscode.commands.registerCommand("forgewireFabric.deferApproval", deferApprovalCmd),
+    vscode.commands.registerCommand("forgewireFabric.showDeferredApprovals", showDeferredApprovalsCmd),
+    vscode.commands.registerCommand("forgewireFabric.examineApproval", examineApprovalCmd),
+    vscode.commands.registerCommand("forgewireFabric.copyApprovalReference", copyApprovalReferenceCmd),
     vscode.commands.registerCommand("forgewireFabric.copyToken", copyToken),
     vscode.commands.registerCommand("forgewireFabric.generateToken", generateToken),
     vscode.commands.registerCommand("forgewireFabric.openSettings", openSettings),
@@ -141,8 +155,10 @@ function getProbe(): typeof lastProbe {
 }
 
 function updateStatus(): void {
+  pruneExpiredSnoozes();
   const c = getClient();
   vscode.commands.executeCommand("setContext", "forgewireFabric.connected", !!c);
+  vscode.commands.executeCommand("setContext", "forgewireFabric.hasDeferredApprovals", snoozedApprovals.size > 0);
   if (c) {
     const cfg = vscode.workspace.getConfiguration("forgewireFabric");
     const name = (cfg.get<string>("hubName") ?? "").trim();
@@ -627,6 +643,278 @@ async function showTaskCmd(arg: number | { id: number }): Promise<void> {
       `Show failed: ${err instanceof Error ? err.message : String(err)}`
     );
   }
+}
+
+async function approveApprovalCmd(arg: ApprovalCommandArg): Promise<void> {
+  const c = getClient();
+  if (!c) {
+    vscode.window.showWarningMessage("Connect to a hub first.");
+    return;
+  }
+  const approval = await resolveApprovalArg(arg, c);
+  if (!approval) return;
+  const label = approval.task_label || approval.approval_id;
+  const ok = await vscode.window.showWarningMessage(
+    `Approve ${label}?`,
+    { modal: true },
+    "Approve",
+    "Examine"
+  );
+  if (ok === "Examine") {
+    await examineApprovalCmd(approval);
+    return;
+  }
+  if (ok !== "Approve") return;
+  const reason = await vscode.window.showInputBox({
+    title: "Approval note (optional)",
+    placeHolder: "Approved from VS Code",
+    ignoreFocusOut: true,
+  });
+  try {
+    await c.approveApproval(approval.approval_id, defaultApprover(), reason ?? "Approved from VS Code");
+    await removeSnoozedApproval(approval.approval_id);
+    vscode.window.showInformationMessage(`Approved ${label}.`);
+    refreshAll();
+  } catch (err) {
+    vscode.window.showErrorMessage(`Approve failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+async function denyApprovalCmd(arg: ApprovalCommandArg): Promise<void> {
+  const c = getClient();
+  if (!c) {
+    vscode.window.showWarningMessage("Connect to a hub first.");
+    return;
+  }
+  const approval = await resolveApprovalArg(arg, c);
+  if (!approval) return;
+  const label = approval.task_label || approval.approval_id;
+  const reason = await vscode.window.showInputBox({
+    title: `Deny ${label}`,
+    prompt: "Reason for denial",
+    ignoreFocusOut: true,
+    validateInput: (value) => (value.trim() ? null : "A denial reason is required"),
+  });
+  if (!reason) return;
+  try {
+    await c.denyApproval(approval.approval_id, defaultApprover(), reason.trim());
+    await removeSnoozedApproval(approval.approval_id);
+    vscode.window.showInformationMessage(`Denied ${label}.`);
+    refreshAll();
+  } catch (err) {
+    vscode.window.showErrorMessage(`Deny failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+async function deferApprovalCmd(arg: ApprovalCommandArg): Promise<void> {
+  const c = getClient();
+  const approval = await resolveApprovalArg(arg, c);
+  if (!approval) return;
+  const snooze = await pickSnoozeDuration(approval);
+  if (!snooze) return;
+  await setSnoozedApproval(approval, snooze.expiresAt);
+  updateStatus();
+  approvalsProvider?.refresh();
+  vscode.window.showInformationMessage(
+    `Snoozed ${approval.task_label || approval.approval_id} until ${formatLocalDateTime(snooze.expiresAt)}.`,
+    "Show Snoozed"
+  ).then((selection) => {
+    if (selection === "Show Snoozed") {
+      showDeferredApprovalsCmd();
+    }
+  });
+}
+
+async function showDeferredApprovalsCmd(): Promise<void> {
+  snoozedApprovals.clear();
+  await persistSnoozedApprovals();
+  updateStatus();
+  approvalsProvider?.refresh();
+}
+
+async function examineApprovalCmd(arg: ApprovalCommandArg): Promise<void> {
+  const c = getClient();
+  const approval = await resolveApprovalArg(arg, c);
+  if (!approval) return;
+  let fresh = approval;
+  if (c) {
+    fresh = await c.getApproval(approval.approval_id).catch(() => approval);
+  }
+  const doc = await vscode.workspace.openTextDocument({
+    content: JSON.stringify(expandApprovalForDisplay(fresh), null, 2),
+    language: "json",
+  });
+  await vscode.window.showTextDocument(doc, { preview: true });
+}
+
+async function copyApprovalReferenceCmd(arg: ApprovalCommandArg): Promise<void> {
+  const c = getClient();
+  const approval = await resolveApprovalArg(arg, c);
+  if (!approval) return;
+  const picks: Array<{ label: string; description: string; value: string }> = [
+    { label: "Approval ID", description: approval.approval_id, value: approval.approval_id },
+  ];
+  if (approval.envelope_hash) {
+    picks.push({ label: "Envelope hash", description: approval.envelope_hash, value: approval.envelope_hash });
+  }
+  const selected = picks.length === 1
+    ? picks[0]
+    : await vscode.window.showQuickPick(picks, {
+        title: "Copy approval reference",
+        placeHolder: "Choose the value to copy",
+        ignoreFocusOut: true,
+      });
+  if (!selected) return;
+  await vscode.env.clipboard.writeText(selected.value);
+  vscode.window.showInformationMessage(`Copied ${selected.label.toLowerCase()}.`);
+}
+
+type ApprovalCommandArg = string | ApprovalInfo | ApprovalNode | undefined;
+
+interface SnoozedApproval {
+  approvalId: string;
+  label: string;
+  snoozedAt: number;
+  expiresAt: number;
+}
+
+async function resolveApprovalArg(arg: ApprovalCommandArg, client?: HubClient): Promise<ApprovalInfo | undefined> {
+  if (!arg) return undefined;
+  if (typeof arg === "string") {
+    return client?.getApproval(arg).catch(() => undefined);
+  }
+  if (isApprovalNode(arg)) {
+    return arg.approval;
+  }
+  if ("approval_id" in arg) {
+    return arg;
+  }
+  return undefined;
+}
+
+function isApprovalNode(arg: ApprovalInfo | ApprovalNode): arg is Extract<ApprovalNode, { kind: "approval" }> {
+  return "kind" in arg && arg.kind === "approval";
+}
+
+function defaultApprover(): string {
+  const username = os.userInfo().username || "vscode";
+  return `${username}@${os.hostname()}`;
+}
+
+function approvalAgeBadgeHours(): number {
+  const cfg = vscode.workspace.getConfiguration("forgewireFabric");
+  return Math.max(1, cfg.get<number>("approvals.ageBadgeHours") ?? 24);
+}
+
+function getSnoozedApproval(approvalId: string): SnoozedApproval | undefined {
+  pruneExpiredSnoozes();
+  return snoozedApprovals.get(approvalId);
+}
+
+function loadSnoozedApprovals(): void {
+  const stored = context.globalState.get<SnoozedApproval[]>(SNOOZED_APPROVALS_KEY, []);
+  snoozedApprovals.clear();
+  const now = Date.now();
+  for (const item of stored) {
+    if (!item?.approvalId || !Number.isFinite(item.expiresAt) || item.expiresAt <= now) {
+      continue;
+    }
+    snoozedApprovals.set(item.approvalId, item);
+  }
+  void persistSnoozedApprovals();
+}
+
+function pruneExpiredSnoozes(): void {
+  const now = Date.now();
+  let changed = false;
+  for (const [approvalId, item] of snoozedApprovals) {
+    if (item.expiresAt <= now) {
+      snoozedApprovals.delete(approvalId);
+      changed = true;
+    }
+  }
+  if (changed) {
+    void persistSnoozedApprovals();
+  }
+}
+
+async function setSnoozedApproval(approval: ApprovalInfo, expiresAt: number): Promise<void> {
+  snoozedApprovals.set(approval.approval_id, {
+    approvalId: approval.approval_id,
+    label: approval.task_label || approval.approval_id,
+    snoozedAt: Date.now(),
+    expiresAt,
+  });
+  await persistSnoozedApprovals();
+}
+
+async function removeSnoozedApproval(approvalId: string): Promise<void> {
+  if (snoozedApprovals.delete(approvalId)) {
+    await persistSnoozedApprovals();
+  }
+}
+
+async function persistSnoozedApprovals(): Promise<void> {
+  await context.globalState.update(SNOOZED_APPROVALS_KEY, Array.from(snoozedApprovals.values()));
+}
+
+async function pickSnoozeDuration(approval: ApprovalInfo): Promise<{ expiresAt: number } | undefined> {
+  const now = Date.now();
+  const selection = await vscode.window.showQuickPick(
+    [
+      { label: "1 hour", expiresAt: now + 60 * 60 * 1000 },
+      { label: "4 hours", expiresAt: now + 4 * 60 * 60 * 1000 },
+      { label: "Tomorrow", expiresAt: now + 24 * 60 * 60 * 1000 },
+      { label: "1 week", expiresAt: now + 7 * 24 * 60 * 60 * 1000 },
+      { label: "Custom...", expiresAt: 0 },
+    ],
+    {
+      title: `Snooze ${approval.task_label || approval.approval_id}`,
+      placeHolder: "Hide this approval locally until...",
+      ignoreFocusOut: true,
+    }
+  );
+  if (!selection) return undefined;
+  if (selection.expiresAt > 0) {
+    return { expiresAt: selection.expiresAt };
+  }
+  const hours = await vscode.window.showInputBox({
+    title: "Custom snooze duration",
+    prompt: "Hours to hide this approval locally",
+    value: "8",
+    ignoreFocusOut: true,
+    validateInput: (value) => {
+      const parsed = Number(value.trim());
+      if (!Number.isFinite(parsed) || parsed <= 0) return "Enter a positive number of hours";
+      if (parsed > 24 * 30) return "Maximum snooze is 30 days";
+      return null;
+    },
+  });
+  if (!hours) return undefined;
+  return { expiresAt: now + Number(hours.trim()) * 60 * 60 * 1000 };
+}
+
+function formatLocalDateTime(timestamp: number): string {
+  return new Date(timestamp).toLocaleString();
+}
+
+function expandApprovalForDisplay(approval: ApprovalInfo): Record<string, unknown> {
+  const expanded: Record<string, unknown> = { ...approval };
+  if (typeof approval.scope_globs_json === "string") {
+    try {
+      expanded.scope_globs = JSON.parse(approval.scope_globs_json);
+    } catch {
+      expanded.scope_globs = approval.scope_globs_json;
+    }
+  }
+  if (typeof approval.decision_json === "string") {
+    try {
+      expanded.decision = JSON.parse(approval.decision_json);
+    } catch {
+      expanded.decision = approval.decision_json;
+    }
+  }
+  return expanded;
 }
 
 // ---------------------------------------------------------------------------

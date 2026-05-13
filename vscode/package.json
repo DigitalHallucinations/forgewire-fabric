@@ -2,7 +2,7 @@
   "name": "forgewire-fabric",
   "displayName": "ForgeWire Fabric",
   "description": "Dispatch tasks to a ForgeWire Fabric compute mesh: signed envelopes, scope-bound capability tokens, live stream output. Run a hub or runner from inside VS Code on Windows, macOS, or Linux.",
-  "version": "0.1.12",
+  "version": "0.1.14",
   "publisher": "DigitalHallucinations",
   "license": "Apache-2.0",
   "icon": "media/icon.png",
@@ -92,6 +92,12 @@
           "default": 10,
           "minimum": 2,
           "description": "How often to refresh the runners and tasks tree views."
+        },
+        "forgewireFabric.approvals.ageBadgeHours": {
+          "type": "number",
+          "default": 24,
+          "minimum": 1,
+          "description": "Show an aged-approval warning badge after this many hours pending."
         },
         "forgewireFabric.autoStartHubPort": {
           "type": "number",
@@ -210,6 +216,42 @@
         "command": "forgewireFabric.showTask",
         "title": "Show Task",
         "category": "ForgeWire Fabric"
+      },
+      {
+        "command": "forgewireFabric.approveApproval",
+        "title": "Approve Approval",
+        "category": "ForgeWire Fabric",
+        "icon": "$(check)"
+      },
+      {
+        "command": "forgewireFabric.denyApproval",
+        "title": "Deny Approval",
+        "category": "ForgeWire Fabric",
+        "icon": "$(circle-slash)"
+      },
+      {
+        "command": "forgewireFabric.deferApproval",
+        "title": "Snooze Approval...",
+        "category": "ForgeWire Fabric",
+        "icon": "$(debug-pause)"
+      },
+      {
+        "command": "forgewireFabric.showDeferredApprovals",
+        "title": "Show Snoozed Approvals",
+        "category": "ForgeWire Fabric",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "forgewireFabric.examineApproval",
+        "title": "Examine Approval",
+        "category": "ForgeWire Fabric",
+        "icon": "$(inspect)"
+      },
+      {
+        "command": "forgewireFabric.copyApprovalReference",
+        "title": "Copy Approval ID / Envelope Hash",
+        "category": "ForgeWire Fabric",
+        "icon": "$(copy)"
       },
       {
         "command": "forgewireFabric.copyToken",
@@ -446,6 +488,11 @@
           "group": "navigation@2"
         },
         {
+          "command": "forgewireFabric.showDeferredApprovals",
+          "when": "view == forgewireFabric.approvals && forgewireFabric.hasDeferredApprovals",
+          "group": "navigation@2"
+        },
+        {
           "command": "forgewireFabric.connectHub",
           "when": "view == forgewireFabric.hosts",
           "group": "navigation@2"
@@ -520,6 +567,31 @@
         {
           "command": "forgewireFabric.showTask",
           "when": "view == forgewireFabric.tasks && viewItem =~ /^task\\./"
+        },
+        {
+          "command": "forgewireFabric.approveApproval",
+          "when": "view == forgewireFabric.approvals && viewItem == approval.pending",
+          "group": "inline@1"
+        },
+        {
+          "command": "forgewireFabric.denyApproval",
+          "when": "view == forgewireFabric.approvals && viewItem == approval.pending",
+          "group": "inline@2"
+        },
+        {
+          "command": "forgewireFabric.deferApproval",
+          "when": "view == forgewireFabric.approvals && viewItem == approval.pending",
+          "group": "inline@3"
+        },
+        {
+          "command": "forgewireFabric.examineApproval",
+          "when": "view == forgewireFabric.approvals && viewItem =~ /^approval\\./",
+          "group": "inline@4"
+        },
+        {
+          "command": "forgewireFabric.copyApprovalReference",
+          "when": "view == forgewireFabric.approvals && viewItem =~ /^approval\\./",
+          "group": "inline@5"
         }
       ],
       "commandPalette": [
@@ -531,6 +603,26 @@
         },
         {
           "command": "forgewireFabric.showTask"
+        },
+        {
+          "command": "forgewireFabric.approveApproval",
+          "when": "false"
+        },
+        {
+          "command": "forgewireFabric.denyApproval",
+          "when": "false"
+        },
+        {
+          "command": "forgewireFabric.deferApproval",
+          "when": "false"
+        },
+        {
+          "command": "forgewireFabric.examineApproval",
+          "when": "false"
+        },
+        {
+          "command": "forgewireFabric.copyApprovalReference",
+          "when": "false"
         },
         {
           "command": "forgewireFabric.pauseRunner"

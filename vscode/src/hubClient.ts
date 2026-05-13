@@ -49,6 +49,8 @@ export interface ApprovalInfo {
   task_label?: string;
   branch?: string;
   scope_globs?: string[];
+  scope_globs_json?: string;
+  decision_json?: string;
   created_at?: string;
   resolved_at?: string | null;
   approver?: string | null;
@@ -308,6 +310,10 @@ export class HubClient {
       `/approvals?${params.toString()}`
     );
     return j.approvals ?? [];
+  }
+
+  async getApproval(id: string): Promise<ApprovalInfo> {
+    return this.request<ApprovalInfo>("GET", `/approvals/${encodeURIComponent(id)}`);
   }
 
   async approveApproval(id: string, approver: string, reason?: string): Promise<void> {

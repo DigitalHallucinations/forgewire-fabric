@@ -1191,13 +1191,24 @@ export class DispatchersProvider implements vscode.TreeDataProvider<DispatcherNo
 
 export type ApprovalNode =
   | { kind: "approval"; approval: ApprovalInfo }
-  | { kind: "placeholder"; label: string; description?: string; icon: string };
+  | { kind: "placeholder"; label: string; description?: string; icon: string; command?: vscode.Command; contextValue?: string };
+
+export interface SnoozedApprovalInfo {
+  approvalId: string;
+  label: string;
+  snoozedAt: number;
+  expiresAt: number;
+}
 
 export class ApprovalsProvider implements vscode.TreeDataProvider<ApprovalNode> {
   private readonly _onDidChange = new vscode.EventEmitter<ApprovalNode | undefined | void>();
   readonly onDidChangeTreeData = this._onDidChange.event;
 
-  constructor(private readonly client: () => HubClient | undefined) {}
+  constructor(
+    private readonly client: () => HubClient | undefined,
+    private readonly getSnoozed: (approvalId: string) => SnoozedApprovalInfo | undefined = () => undefined,
+    private readonly ageBadgeHours: () => number = () => 24
+  ) {}
 
   refresh(): void {
     this._onDidChange.fire();
@@ -1209,10 +1220,23 @@ export class ApprovalsProvider implements vscode.TreeDataProvider<ApprovalNode> 
     if (!c) return [{ kind: "placeholder", label: "Not connected", icon: "debug-disconnect" }];
     try {
       const approvals = await c.listApprovals("pending", 100);
+      const visible = approvals.filter((a) => !this.getSnoozed(a.approval_id));
+      const deferredCount = approvals.length - visible.length;
       if (approvals.length === 0) {
         return [{ kind: "placeholder", label: "No pending approvals", icon: "check", description: "queue is clear" }];
       }
-      return approvals.map((a) => ({ kind: "approval" as const, approval: a }));
+      const nodes: ApprovalNode[] = visible.map((a) => ({ kind: "approval" as const, approval: a }));
+      if (deferredCount > 0) {
+        nodes.push({
+          kind: "placeholder",
+          label: `${deferredCount} deferred approval${deferredCount === 1 ? "" : "s"}`,
+          description: "snoozed locally",
+          icon: "debug-pause",
+          command: { command: "forgewireFabric.showDeferredApprovals", title: "Show Snoozed Approvals" },
+          contextValue: "approval.deferred.placeholder",
+        });
+      }
+      return nodes;
     } catch (err) {
       return [
         {
@@ -1230,29 +1254,94 @@ export class ApprovalsProvider implements vscode.TreeDataProvider<ApprovalNode> 
       const item = new vscode.TreeItem(n.label, vscode.TreeItemCollapsibleState.None);
       item.description = n.description;
       item.iconPath = new vscode.ThemeIcon(n.icon);
-      item.contextValue = "approval.placeholder";
+      item.contextValue = n.contextValue ?? "approval.placeholder";
+      if (n.command) item.command = n.command;
       return item;
     }
     const a = n.approval;
     const item = new vscode.TreeItem(a.task_label || a.approval_id.slice(0, 12), vscode.TreeItemCollapsibleState.None);
     item.id = `approval:${a.approval_id}`;
-    item.description = `${a.status} \u00b7 ${a.branch ?? ""}`;
+    const age = approvalAge(a.created_at);
+    const thresholdMs = this.ageBadgeHours() * 60 * 60 * 1000;
+    const isOld = a.status === "pending" && age !== undefined && age.ms >= thresholdMs;
+    item.description = [a.status, a.branch, age ? `age ${age.label}` : undefined, isOld ? "needs review" : undefined]
+      .filter(Boolean)
+      .join(" \u00b7 ");
     item.iconPath = new vscode.ThemeIcon(
-      a.status === "pending" ? "circle-large-outline" : a.status === "approved" ? "check" : "circle-slash",
-      a.status === "pending" ? new vscode.ThemeColor("charts.yellow") : undefined
+      isOld ? "warning" : a.status === "pending" ? "circle-large-outline" : a.status === "approved" ? "check" : "circle-slash",
+      a.status === "pending" ? new vscode.ThemeColor(isOld ? "charts.orange" : "charts.yellow") : undefined
     );
     item.contextValue = `approval.${a.status}`;
+    item.command = {
+      command: "forgewireFabric.examineApproval",
+      title: "Examine Approval",
+      arguments: [a],
+    };
+    const scopes = approvalScopes(a);
+    const decision = approvalDecisionSummary(a);
     item.tooltip = new vscode.MarkdownString(
       `**${a.task_label ?? a.approval_id}**\n\n` +
         `- approval_id: \`${a.approval_id}\`\n` +
         `- status: \`${a.status}\`\n` +
         `- branch: \`${a.branch ?? "?"}\`\n` +
-        `- scope: \`${(a.scope_globs ?? []).join(", ")}\`\n` +
+        `- scope: \`${scopes.join(", ")}\`\n` +
+        (age ? `- age: ${age.label} (badge threshold ${this.ageBadgeHours()}h)\n` : "") +
+        (decision ? `- decision: ${decision}\n` : "") +
         `- created: ${a.created_at ?? "?"}\n` +
         (a.resolved_at ? `- resolved: ${a.resolved_at} by ${a.approver ?? "?"}\n` : "") +
         (a.reason ? `- reason: ${a.reason}\n` : "")
     ).value;
     return item;
+  }
+}
+
+function approvalScopes(a: ApprovalInfo): string[] {
+  if (Array.isArray(a.scope_globs)) {
+    return a.scope_globs.map(String);
+  }
+  if (typeof a.scope_globs_json === "string" && a.scope_globs_json.trim()) {
+    try {
+      const parsed = JSON.parse(a.scope_globs_json);
+      if (Array.isArray(parsed)) {
+        return parsed.map(String);
+      }
+    } catch {
+      return [a.scope_globs_json];
+    }
+  }
+  return [];
+}
+
+function approvalAge(createdAt: string | undefined): { ms: number; label: string } | undefined {
+  if (!createdAt) return undefined;
+  const parsed = Date.parse(createdAt.endsWith("Z") ? createdAt : `${createdAt}Z`);
+  if (!Number.isFinite(parsed)) return undefined;
+  const ms = Math.max(0, Date.now() - parsed);
+  return { ms, label: formatDuration(ms / 1000) };
+}
+
+function formatDuration(totalSeconds: number): string {
+  const seconds = Math.floor(totalSeconds);
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m`;
+  return `${seconds}s`;
+}
+
+function approvalDecisionSummary(a: ApprovalInfo): string | undefined {
+  if (typeof a.decision_json !== "string" || !a.decision_json.trim()) {
+    return undefined;
+  }
+  try {
+    const decision = JSON.parse(a.decision_json) as { decision?: string; reason?: string; violations?: Array<{ message?: string }> };
+    const head = [decision.decision, decision.reason].filter(Boolean).join(" / ");
+    const violation = decision.violations?.[0]?.message;
+    return [head, violation].filter(Boolean).join(" - ");
+  } catch {
+    return a.decision_json.slice(0, 120);
   }
 }
 
