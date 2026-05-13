@@ -2105,6 +2105,51 @@ class Blackboard:
                     raise KeyError(dispatcher_id)
                 raise PermissionError("nonce replay rejected")
 
+    # ----------------------------------------------------------- deregister
+
+    def delete_runner(self, runner_id: str) -> dict[str, Any]:
+        """Remove a runner registration.
+
+        Returns the runner record as it was before deletion. Raises
+        ``KeyError`` if the runner is unknown. Tasks previously claimed by
+        the runner keep their dangling ``worker_id`` for audit replay --
+        this method only drops the live registry row so the host stops
+        appearing in the /hosts pane once any derived host_role rows have
+        also been cleaned up by the caller.
+        """
+        record = self.get_runner(runner_id)
+        with self._connect() as conn:
+            conn.execute("DELETE FROM runners WHERE runner_id = ?", (runner_id,))
+        return record
+
+    def delete_dispatcher(self, dispatcher_id: str) -> dict[str, Any]:
+        """Remove a dispatcher registration.
+
+        Returns the dispatcher record as it was before deletion. Raises
+        ``KeyError`` if unknown. Also removes the ``host_roles`` row for
+        ``role='dispatch'`` on this dispatcher's hostname when no other
+        dispatcher remains on that host, so the /hosts pane fully retires
+        the row instead of leaving a stale ``dispatch:registered`` badge.
+        """
+        record = self.get_dispatcher(dispatcher_id)
+        hostname = _normalize_hostname(record.get("hostname")) if record.get("hostname") else ""
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM dispatchers WHERE dispatcher_id = ?",
+                (dispatcher_id,),
+            )
+            if hostname:
+                remaining = conn.execute(
+                    "SELECT COUNT(*) AS n FROM dispatchers WHERE hostname = ?",
+                    (hostname,),
+                ).fetchone()
+                if remaining is None or int(remaining["n"]) == 0:
+                    conn.execute(
+                        "DELETE FROM host_roles WHERE hostname = ? AND role = 'dispatch'",
+                        (hostname,),
+                    )
+        return record
+
     @staticmethod
     def _derive_state(runner: dict[str, Any]) -> str:
         if runner.get("drain_requested"):

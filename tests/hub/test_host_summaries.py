@@ -202,6 +202,73 @@ def test_host_role_report_requires_auth(tmp_path: Path) -> None:
         assert r.status_code == 401
 
 
+def test_deregister_runner_removes_host_row(tmp_path: Path) -> None:
+    app = _make_app(tmp_path)
+    with TestClient(app) as client:
+        runner_id = _register_runner(
+            client, tmp_path, hostname="GHOST-RUNNER", tags=["kind:agent"]
+        )
+
+        r = client.get("/hosts", headers=_auth())
+        assert r.status_code == 200, r.text
+        hostnames = {h["hostname"].lower() for h in r.json()["hosts"]}
+        assert "ghost-runner" in hostnames
+
+        r = client.delete(f"/runners/{runner_id}", headers=_auth())
+        assert r.status_code == 200, r.text
+        assert r.json()["runner_id"] == runner_id
+
+        # Second delete is idempotent: 404.
+        r = client.delete(f"/runners/{runner_id}", headers=_auth())
+        assert r.status_code == 404, r.text
+
+        # Host should no longer appear in /hosts (no runners, no dispatchers,
+        # no host_roles tied to GHOST-RUNNER), aside from the active hub host.
+        r = client.get("/hosts", headers=_auth())
+        assert r.status_code == 200, r.text
+        hostnames = {h["hostname"].lower() for h in r.json()["hosts"]}
+        assert "ghost-runner" not in hostnames
+
+
+def test_deregister_dispatcher_clears_dispatch_host_role(tmp_path: Path) -> None:
+    app = _make_app(tmp_path)
+    with TestClient(app) as client:
+        dispatcher_id = _register_dispatcher(
+            client, tmp_path, hostname="GHOST-DISPATCHER"
+        )
+
+        r = client.get("/hosts", headers=_auth())
+        hosts_by_name = {h["hostname"].lower(): h for h in r.json()["hosts"]}
+        assert "ghost-dispatcher" in hosts_by_name
+        assert hosts_by_name["ghost-dispatcher"]["roles"]["dispatch"]["status"] == "registered"
+
+        r = client.delete(
+            f"/dispatchers/{dispatcher_id}", headers=_auth()
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["dispatcher_id"] == dispatcher_id
+
+        r = client.delete(
+            f"/dispatchers/{dispatcher_id}", headers=_auth()
+        )
+        assert r.status_code == 404, r.text
+
+        # The dispatch host_role row should be gone, so the host drops off
+        # /hosts entirely (no runners, no dispatchers, no host_roles).
+        r = client.get("/hosts", headers=_auth())
+        hostnames = {h["hostname"].lower() for h in r.json()["hosts"]}
+        assert "ghost-dispatcher" not in hostnames
+
+
+def test_deregister_endpoints_require_auth(tmp_path: Path) -> None:
+    app = _make_app(tmp_path)
+    with TestClient(app) as client:
+        r = client.delete("/runners/some-id")
+        assert r.status_code == 401
+        r = client.delete("/dispatchers/some-id")
+        assert r.status_code == 401
+
+
 def test_dispatcher_only_rows_do_not_create_hosts(tmp_path: Path) -> None:
     app = _make_app(tmp_path)
     with TestClient(app) as client:
@@ -235,3 +302,5 @@ def test_dispatcher_registration_creates_dispatch_role(tmp_path: Path) -> None:
         assert summary["roles"]["dispatch"]["enabled"] is True
         assert summary["roles"]["dispatch"]["status"] == "registered"
         assert summary["roles"]["dispatch"]["dispatcher_ids"] == [dispatcher_id]
+
+

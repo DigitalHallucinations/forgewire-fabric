@@ -403,6 +403,35 @@ def undrain_runner_by_dispatcher(request: Request, runner_id: str) -> dict[str, 
         raise HTTPException(status_code=404, detail="runner not registered") from exc
 
 
+@router.delete("/runners/{runner_id}", dependencies=[Depends(require_auth)])
+def deregister_runner(request: Request, runner_id: str) -> dict[str, Any]:
+    """Remove a runner row from the registry.
+
+    Idempotent: returns 404 if the runner is unknown, 200 with the
+    deleted record otherwise. Used by ephemeral test harnesses (e.g. the
+    live approval smoke) so probe identities do not accumulate as ghost
+    host rows in the /hosts pane.
+    """
+    try:
+        return get_context(request).blackboard.delete_runner(runner_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="runner not registered") from exc
+
+
+@router.delete("/dispatchers/{dispatcher_id}", dependencies=[Depends(require_auth)])
+def deregister_dispatcher(request: Request, dispatcher_id: str) -> dict[str, Any]:
+    """Remove a dispatcher row from the registry.
+
+    Idempotent: returns 404 if unknown, 200 with the deleted record
+    otherwise. Also retires the matching dispatch host_role row when no
+    other dispatcher remains on that hostname.
+    """
+    try:
+        return get_context(request).blackboard.delete_dispatcher(dispatcher_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="dispatcher not registered") from exc
+
+
 @router.post("/tasks/claim-v2", dependencies=[Depends(require_auth)])
 def claim_task_v2(request: Request, payload: ClaimV2Request) -> JSONResponse:
     ctx = get_context(request)

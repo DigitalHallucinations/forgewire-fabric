@@ -436,6 +436,8 @@ async def _cleanup(
     *,
     pending_approvals: set[str],
     task_ids: set[int],
+    ephemeral_runner_ids: set[str] | None = None,
+    ephemeral_dispatcher_ids: set[str] | None = None,
 ) -> None:
     for approval_id in sorted(pending_approvals):
         try:
@@ -460,6 +462,30 @@ async def _cleanup(
                 print(f"[cleanup] cancel requested for nonterminal task {task_id}")
         except httpx.HTTPError as exc:
             print(f"[cleanup] failed task cleanup {task_id}: {exc}")
+
+    # Deregister ephemeral runner/dispatcher identities so they do not
+    # accumulate as ghost rows in the /hosts pane. Idempotent: 404 is
+    # treated as already-gone.
+    for runner_id in sorted(ephemeral_runner_ids or set()):
+        try:
+            r = await client.delete(f"/runners/{runner_id}")
+            if r.status_code in (200, 404):
+                print(f"[cleanup] deregistered runner {runner_id} ({r.status_code})")
+            else:
+                print(f"[cleanup] runner deregister {runner_id} -> {r.status_code} {r.text}")
+        except httpx.HTTPError as exc:
+            print(f"[cleanup] failed runner deregister {runner_id}: {exc}")
+    for dispatcher_id in sorted(ephemeral_dispatcher_ids or set()):
+        try:
+            r = await client.delete(f"/dispatchers/{dispatcher_id}")
+            if r.status_code in (200, 404):
+                print(f"[cleanup] deregistered dispatcher {dispatcher_id} ({r.status_code})")
+            else:
+                print(
+                    f"[cleanup] dispatcher deregister {dispatcher_id} -> {r.status_code} {r.text}"
+                )
+        except httpx.HTTPError as exc:
+            print(f"[cleanup] failed dispatcher deregister {dispatcher_id}: {exc}")
 
 
 async def run(args: argparse.Namespace) -> int:
@@ -596,6 +622,8 @@ async def run(args: argparse.Namespace) -> int:
                     client,
                     pending_approvals=pending_approvals,
                     task_ids=task_ids,
+                    ephemeral_runner_ids={agent_runner.runner_id},
+                    ephemeral_dispatcher_ids={dispatcher.dispatcher_id},
                 )
 
 
