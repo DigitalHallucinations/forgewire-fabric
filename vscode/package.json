@@ -2,7 +2,7 @@
   "name": "forgewire-fabric",
   "displayName": "ForgeWire Fabric",
   "description": "Dispatch tasks to a ForgeWire Fabric compute mesh: signed envelopes, scope-bound capability tokens, live stream output. Run a hub or runner from inside VS Code on Windows, macOS, or Linux.",
-  "version": "0.1.14",
+  "version": "0.1.15",
   "publisher": "DigitalHallucinations",
   "license": "Apache-2.0",
   "icon": "media/icon.png",
@@ -425,6 +425,18 @@
           "contextualTitle": "ForgeWire Fabric Approvals"
         },
         {
+          "id": "forgewireFabric.approvalsHistory",
+          "name": "Approvals history",
+          "icon": "$(history)",
+          "contextualTitle": "ForgeWire Fabric Approvals History"
+        },
+        {
+          "id": "forgewireFabric.tasksHistory",
+          "name": "Tasks history",
+          "icon": "$(history)",
+          "contextualTitle": "ForgeWire Fabric Tasks History"
+        },
+        {
           "id": "forgewireFabric.audit",
           "name": "Audit log",
           "icon": "$(history)",
@@ -460,6 +472,16 @@
         "when": "!forgewireFabric.connected"
       },
       {
+        "view": "forgewireFabric.approvalsHistory",
+        "contents": "No hub connection.\n\n[Connect to Hub](command:forgewireFabric.connectHub)",
+        "when": "!forgewireFabric.connected"
+      },
+      {
+        "view": "forgewireFabric.tasksHistory",
+        "contents": "No hub connection.\n\n[Connect to Hub](command:forgewireFabric.connectHub)",
+        "when": "!forgewireFabric.connected"
+      },
+      {
         "view": "forgewireFabric.audit",
         "contents": "No hub connection.\n\n[Connect to Hub](command:forgewireFabric.connectHub)",
         "when": "!forgewireFabric.connected"
@@ -474,7 +496,7 @@
       "view/title": [
         {
           "command": "forgewireFabric.refresh",
-          "when": "view == forgewireFabric.tasks || view == forgewireFabric.hub || view == forgewireFabric.hosts || view == forgewireFabric.approvals || view == forgewireFabric.audit || view == forgewireFabric.secrets",
+          "when": "view == forgewireFabric.tasks || view == forgewireFabric.hub || view == forgewireFabric.hosts || view == forgewireFabric.approvals || view == forgewireFabric.approvalsHistory || view == forgewireFabric.tasksHistory || view == forgewireFabric.audit || view == forgewireFabric.secrets",
           "group": "navigation@1"
         },
         {
