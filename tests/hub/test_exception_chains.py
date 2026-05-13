@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
@@ -21,14 +22,6 @@ def _post_endpoint(app: Any, path: str) -> Callable[..., Any]:
     raise AssertionError(f"POST route not found: {path}")
 
 
-def _closed_over_blackboard(endpoint: Callable[..., Any]) -> Any:
-    for cell in endpoint.__closure__ or ():
-        value = cell.cell_contents
-        if hasattr(value, "create_task") and hasattr(value, "list_tasks"):
-            return value
-    raise AssertionError("route endpoint did not close over a blackboard")
-
-
 def test_dispatch_task_preserves_storage_http_error_cause(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -41,7 +34,7 @@ def test_dispatch_task_preserves_storage_http_error_cause(
         )
     )
     endpoint = _post_endpoint(app, "/tasks")
-    blackboard = _closed_over_blackboard(endpoint)
+    blackboard = app.state.blackboard
 
     storage_error = httpx.ConnectError("rqlite offline")
 
@@ -59,7 +52,7 @@ def test_dispatch_task_preserves_storage_http_error_cause(
     )
 
     with pytest.raises(HTTPException) as caught:
-        endpoint(payload)
+        endpoint(SimpleNamespace(app=app), payload)
 
     assert caught.value.status_code == 502
     assert "rqlite unreachable" in str(caught.value.detail)
