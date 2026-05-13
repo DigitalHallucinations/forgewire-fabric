@@ -828,7 +828,7 @@ export type HostsNode =
   | { kind: "role"; hostname: string; roleName: HostRoleName; role: HostRoleSummary; runner?: RunnerInfo; dispatchers?: DispatcherInfo[] }
   | { kind: "dispatcher"; hostname: string; dispatcher: DispatcherInfo }
   | { kind: "dispatcherProp"; dispatcher: DispatcherInfo; key: string; label: string; description: string; icon: string }
-  | { kind: "health"; key: string; label: string; description: string; icon: string; tooltip?: string; color?: string }
+  | { kind: "health"; key: string; label: string; description: string; icon: string; tooltip?: string; color?: string; children?: HostsNode[] }
   | { kind: "placeholder"; label: string; description?: string; icon: string };
 
 export class HostsProvider implements vscode.TreeDataProvider<HostsNode> {
@@ -921,6 +921,9 @@ export class HostsProvider implements vscode.TreeDataProvider<HostsNode> {
         dispatcher,
       }));
     }
+    if (element.kind === "health" && element.children) {
+      return element.children;
+    }
     if (element.kind === "dispatcher") {
       const d = element.dispatcher;
       const props: HostsNode[] = [
@@ -949,8 +952,12 @@ export class HostsProvider implements vscode.TreeDataProvider<HostsNode> {
       const item = new vscode.TreeItem(n.label, vscode.TreeItemCollapsibleState.Expanded);
       item.id = `hosts:cluster:${n.cluster}`;
       item.iconPath = new vscode.ThemeIcon(n.cluster === "fabric" ? "circuit-board" : "globe");
-      const badge = n.backend ? n.backend : n.cluster === "loom" ? "n/a" : "?";
-      item.description = badge;
+      // Fabric row stays clean — backend identity lives inside the
+      // expandable "Backend" child so it can carry full metadata. Loom
+      // keeps its "n/a" badge until a substrate cluster is wired in.
+      if (n.cluster === "loom") {
+        item.description = n.backend ?? "n/a";
+      }
       item.contextValue = `hosts.cluster.${n.cluster}`;
       item.tooltip =
         n.cluster === "fabric"
@@ -1006,7 +1013,10 @@ export class HostsProvider implements vscode.TreeDataProvider<HostsNode> {
       return item;
     }
     if (n.kind === "health") {
-      const item = new vscode.TreeItem(n.label, vscode.TreeItemCollapsibleState.None);
+      const collapsible = n.children && n.children.length > 0
+        ? vscode.TreeItemCollapsibleState.Collapsed
+        : vscode.TreeItemCollapsibleState.None;
+      const item = new vscode.TreeItem(n.label, collapsible);
       item.id = `hosts:health:${n.key}`;
       item.description = n.description;
       item.iconPath = n.color
@@ -1144,6 +1154,52 @@ function healthNodes(health: ClusterHealth | undefined): HostsNode[] {
     ];
   }
   const nodes: HostsNode[] = [];
+  const backendChildren: HostsNode[] = [
+    {
+      kind: "health",
+      key: "backend.kind",
+      label: "Type",
+      description: health.backend,
+      icon: health.backend === "rqlite" ? "broadcast" : "database",
+      color: health.backend === "rqlite" ? "charts.green" : "charts.yellow",
+      tooltip:
+        health.backend === "rqlite"
+          ? "Distributed rqlite backend (Raft-replicated SQLite)."
+          : "Legacy single-node sqlite backend.",
+    },
+  ];
+  if (health.rqlite) {
+    backendChildren.push(
+      {
+        kind: "health",
+        key: "backend.endpoint",
+        label: "Endpoint",
+        description: `${health.rqlite.host}:${health.rqlite.port}`,
+        icon: "globe",
+        tooltip: `rqlite HTTP endpoint: ${health.rqlite.host}:${health.rqlite.port}`,
+      },
+      {
+        kind: "health",
+        key: "backend.consistency",
+        label: "Consistency",
+        description: health.rqlite.consistency,
+        icon: "shield",
+        tooltip:
+          `rqlite read consistency level: \`${health.rqlite.consistency}\`. ` +
+        `"strong" routes reads through the Raft leader; "weak"/"none" trade ` +
+        `freshness for latency.`,
+      },
+    );
+  } else {
+    backendChildren.push({
+      kind: "health",
+      key: "backend.endpoint",
+      label: "Endpoint",
+      description: "local sqlite",
+      icon: "database",
+      tooltip: "Single-node sqlite backend — no cluster endpoint.",
+    });
+  }
   nodes.push({
     kind: "health",
     key: "backend",
@@ -1155,6 +1211,7 @@ function healthNodes(health: ClusterHealth | undefined): HostsNode[] {
       health.backend === "rqlite"
         ? `rqlite cluster ${health.rqlite?.host}:${health.rqlite?.port} (consistency=${health.rqlite?.consistency})`
         : "Legacy single-node sqlite backend.",
+    children: backendChildren,
   });
   const s = health.labels_snapshot;
   const sidecarColor =
@@ -1182,15 +1239,6 @@ function healthNodes(health: ClusterHealth | undefined): HostsNode[] {
         `- status: \`${s.status ?? "?"}\``
     ).value,
   });
-  if (health.rqlite) {
-    nodes.push({
-      kind: "health",
-      key: "rqlite",
-      label: "rqlite",
-      description: `${health.rqlite.host}:${health.rqlite.port} \u00b7 ${health.rqlite.consistency}`,
-      icon: "broadcast",
-    });
-  }
   return nodes;
 }
 
