@@ -2885,9 +2885,76 @@ class DispatchTaskSignedRequest(DispatchTaskRequest):
 def create_app(config: BlackboardConfig) -> FastAPI:
     from forgewire_fabric import __version__ as _pkg_version
 
+    async def _bump_threadpool() -> None:  # pragma: no cover - runtime
+        # FastAPI runs sync `def` route handlers on the anyio threadpool.
+        # The default limiter is 40, which is undersized for a hub serving
+        # tens of runners polling at >=1 Hz against an rqlite backend
+        # whose Raft-backed writes take 10-30 ms each. Bumping to 200 lets
+        # heartbeats and claims overlap freely instead of queueing behind
+        # /healthz.
+        try:
+            import anyio.to_thread
+
+            limiter = anyio.to_thread.current_default_thread_limiter()
+            limiter.total_tokens = 200
+            logging.getLogger("forgewire_fabric.hub").info(
+                "anyio threadpool sized to %d tokens", limiter.total_tokens
+            )
+        except Exception:  # pragma: no cover - best effort
+            logging.getLogger("forgewire_fabric.hub").exception(
+                "failed to resize anyio threadpool"
+            )
+
+    async def _install_loop_watchdog() -> None:  # pragma: no cover - runtime
+        loop = asyncio.get_running_loop()
+        log = logging.getLogger("forgewire_fabric.hub.watchdog")
+        prev = loop.get_exception_handler()
+
+        def _fatal(message: str, exc: BaseException | None) -> bool:
+            text = (message or "").lower()
+            if "accept failed" in text or "accept_coro" in text:
+                return True
+            if isinstance(exc, OSError):
+                # WinError 64 / 121 / 1236 — listening socket has been torn
+                # down by the OS; we cannot recover without re-binding.
+                return getattr(exc, "winerror", None) in {64, 121, 1236}
+            return False
+
+        def _handler(_loop: asyncio.AbstractEventLoop, ctx: dict) -> None:
+            msg = str(ctx.get("message", ""))
+            exc = ctx.get("exception")
+            if _fatal(msg, exc if isinstance(exc, BaseException) else None):
+                log.critical(
+                    "fatal asyncio failure, exiting for supervisor restart: "
+                    "msg=%r exc=%r",
+                    msg,
+                    exc,
+                )
+                # Flush stdio before bailing.
+                try:
+                    sys.stdout.flush()
+                    sys.stderr.flush()
+                except Exception:
+                    pass
+                os._exit(75)  # EX_TEMPFAIL
+            if prev is not None:
+                prev(_loop, ctx)
+            else:
+                _loop.default_exception_handler(ctx)
+
+        loop.set_exception_handler(_handler)
+        log.info("loop watchdog installed (fatal-exit on accept failures)")
+
+    @contextlib.asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        await _bump_threadpool()
+        await _install_loop_watchdog()
+        yield
+
     app = FastAPI(
         title="ForgeWire Fabric Hub",
         version=_pkg_version,
+        lifespan=lifespan,
     )
     blackboard = Blackboard(
         config.db_path,
@@ -4250,75 +4317,6 @@ def create_app(config: BlackboardConfig) -> FastAPI:
                 await asyncio.sleep(PROGRESS_POLL_SECONDS)
 
         return EventSourceResponse(stream())
-
-    # -- Resilience: fast-exit on fatal socket / accept-loop failures so that
-    #    the service supervisor (NSSM / systemd / launchd) restarts us. On
-    #    Windows IOCP we have observed `OSError: [WinError 64]` propagating
-    #    out of `accept_coro` and silently killing the listening socket while
-    #    the process keeps running. That state is invisible to the supervisor
-    #    and produces "service running, hub unreachable". Convert any such
-    #    fatal asyncio exception into a hard process exit; the supervisor
-    #    will bring us back within seconds.
-    @app.on_event("startup")
-    async def _bump_threadpool() -> None:  # pragma: no cover - runtime
-        # FastAPI runs sync `def` route handlers on the anyio threadpool.
-        # The default limiter is 40, which is undersized for a hub serving
-        # tens of runners polling at >=1 Hz against an rqlite backend
-        # whose Raft-backed writes take 10-30 ms each. Bumping to 200 lets
-        # heartbeats and claims overlap freely instead of queueing behind
-        # /healthz.
-        try:
-            import anyio.to_thread
-
-            limiter = anyio.to_thread.current_default_thread_limiter()
-            limiter.total_tokens = 200
-            logging.getLogger("forgewire_fabric.hub").info(
-                "anyio threadpool sized to %d tokens", limiter.total_tokens
-            )
-        except Exception:  # pragma: no cover - best effort
-            logging.getLogger("forgewire_fabric.hub").exception(
-                "failed to resize anyio threadpool"
-            )
-
-    @app.on_event("startup")
-    async def _install_loop_watchdog() -> None:  # pragma: no cover - runtime
-        loop = asyncio.get_running_loop()
-        log = logging.getLogger("forgewire_fabric.hub.watchdog")
-        prev = loop.get_exception_handler()
-
-        def _fatal(message: str, exc: BaseException | None) -> bool:
-            text = (message or "").lower()
-            if "accept failed" in text or "accept_coro" in text:
-                return True
-            if isinstance(exc, OSError):
-                # WinError 64 / 121 / 1236 — listening socket has been torn
-                # down by the OS; we cannot recover without re-binding.
-                return getattr(exc, "winerror", None) in {64, 121, 1236}
-            return False
-
-        def _handler(_loop: asyncio.AbstractEventLoop, ctx: dict) -> None:
-            msg = str(ctx.get("message", ""))
-            exc = ctx.get("exception")
-            if _fatal(msg, exc if isinstance(exc, BaseException) else None):
-                log.critical(
-                    "fatal asyncio failure, exiting for supervisor restart: "
-                    "msg=%r exc=%r",
-                    msg, exc,
-                )
-                # Flush stdio before bailing.
-                try:
-                    sys.stdout.flush()
-                    sys.stderr.flush()
-                except Exception:
-                    pass
-                os._exit(75)  # EX_TEMPFAIL
-            if prev is not None:
-                prev(_loop, ctx)
-            else:
-                _loop.default_exception_handler(ctx)
-
-        loop.set_exception_handler(_handler)
-        log.info("loop watchdog installed (fatal-exit on accept failures)")
 
     return app
 

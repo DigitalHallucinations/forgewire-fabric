@@ -37,3 +37,6 @@ Thumbs.db
 # Logs
 *.log
 logs/
+
+# Build artifacts and scratch
+tmp/
