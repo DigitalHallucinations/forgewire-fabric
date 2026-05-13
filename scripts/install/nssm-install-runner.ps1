@@ -67,6 +67,33 @@ if (-not (Get-Command nssm.exe -ErrorAction SilentlyContinue)) {
 if (-not (Test-Path $PythonExe)) { throw "Python not found: $PythonExe" }
 if (-not (Test-Path $WorkspaceRoot)) { throw "Workspace not found: $WorkspaceRoot" }
 
+# ---- Pre-flight ----------------------------------------------------------
+# NSSM throttle-on-rapid-exit marks a service SERVICE_PAUSED when the child
+# crashes faster than AppRestartDelay. The #1 cause in the field is a Python
+# env that cannot import the runner module. Fail fast here rather than
+# shipping a crash-looping service that NSSM mislabels as "paused".
+Write-Host "Pre-flight: importing forgewire_fabric.cli via $PythonExe ..."
+$prevPref0 = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+$preflight = & $PythonExe -c "import forgewire_fabric.cli" 2>&1
+$preflightExit = $LASTEXITCODE
+$ErrorActionPreference = $prevPref0
+if ($preflightExit -ne 0) {
+    $preflightText = ($preflight | Out-String).Trim()
+    throw @"
+Pre-flight import failed (exit $preflightExit) for forgewire_fabric.cli using:
+    $PythonExe
+
+Output:
+$preflightText
+
+Resolve the environment before installing the service. Typical fixes:
+  * 'git pull' in the forgewire-fabric checkout this venv was built against.
+  * 'pip install -e <forgewire-fabric>/python' (editable install) or
+    'pip install forgewire-fabric' inside the venv.
+"@
+}
+
 $LogDir = Join-Path $DataDir "logs"
 $TokenFile = Join-Path $DataDir "hub.token"
 New-Item -ItemType Directory -Force -Path $DataDir, $LogDir | Out-Null
@@ -123,34 +150,74 @@ if ($ScopePrefixes) { $envVars += "FORGEWIRE_RUNNER_SCOPE_PREFIXES=$ScopePrefixe
 
 & nssm.exe set $ServiceName AppEnvironmentExtra @envVars | Out-Null
 
-# ---- Start + resume (idempotent) -----------------------------------------
-# In PowerShell 7+ native non-zero exit codes raise a terminating error when
-# $PSNativeCommandUseErrorActionPreference is on (the default). Disable that
-# locally so we can poll nssm without aborting on benign exit codes (e.g.
-# 'continue' against a service that has not started yet).
+# ---- Start + verify (idempotent) -----------------------------------------
+# Hard rule: SERVICE_PAUSED is fatal here, never recovered with `nssm
+# continue`. NSSM only sets PAUSED via throttle-on-rapid-exit (child is
+# crash-looping). Issuing `continue` masks that and ships a broken service.
 $prevNative = $PSNativeCommandUseErrorActionPreference
 $PSNativeCommandUseErrorActionPreference = $false
 try {
     function Get-NssmStatus {
         return (& nssm.exe status $ServiceName 2>&1 | Out-String).Trim()
     }
+    function Get-ErrLogTail {
+        $errLog = Join-Path $LogDir "runner.err.log"
+        if (-not (Test-Path $errLog)) { return "(no err log yet)" }
+        try {
+            $tail = Get-Content -Path $errLog -Tail 40 -ErrorAction Stop
+            if (-not $tail) { return "(err log is empty)" }
+            return ($tail -join "`n")
+        } catch {
+            return "(could not read $errLog`: $_)"
+        }
+    }
 
     $status = Get-NssmStatus
-    switch -Regex ($status) {
-        'SERVICE_PAUSED'  { & nssm.exe continue $ServiceName 2>&1 | Out-Null }
-        'SERVICE_STOPPED' { & nssm.exe start    $ServiceName 2>&1 | Out-Null }
-        'SERVICE_RUNNING' { } # already running, no-op
-        default           { & nssm.exe start    $ServiceName 2>&1 | Out-Null }
-    }
-    Start-Sleep -Seconds 2
-    $status = Get-NssmStatus
-    if ($status -eq 'SERVICE_PAUSED') {
-        & nssm.exe continue $ServiceName 2>&1 | Out-Null
-        Start-Sleep -Seconds 1
-        $status = Get-NssmStatus
-    }
     if ($status -ne 'SERVICE_RUNNING') {
-        throw "Service '$ServiceName' is in unexpected state: '$status'. Check logs in $LogDir."
+        & nssm.exe start $ServiceName 2>&1 | Out-Null
+    }
+
+    $TimeoutSeconds = 45
+    $StableSeconds  = 3
+    $deadline    = (Get-Date).AddSeconds($TimeoutSeconds)
+    $stableSince = $null
+    do {
+        Start-Sleep -Milliseconds 500
+        $status = Get-NssmStatus
+        if ($status -eq 'SERVICE_PAUSED') {
+            $tail = Get-ErrLogTail
+            throw @"
+Service '$ServiceName' entered SERVICE_PAUSED during start.
+
+NSSM only sets PAUSED when the child exits faster than AppRestartDelay
+(throttle-on-rapid-exit). The runner is crash-looping; `nssm continue`
+would only retrigger the same crash. Tail of $LogDir\runner.err.log:
+$tail
+"@
+        }
+        if ($status -eq 'SERVICE_STOPPED') {
+            $tail = Get-ErrLogTail
+            throw @"
+Service '$ServiceName' is SERVICE_STOPPED after start. Tail of
+$LogDir\runner.err.log:
+$tail
+"@
+        }
+        if ($status -eq 'SERVICE_RUNNING') {
+            if (-not $stableSince) { $stableSince = Get-Date }
+            if (((Get-Date) - $stableSince).TotalSeconds -ge $StableSeconds) { break }
+        } else {
+            $stableSince = $null
+        }
+    } while ((Get-Date) -lt $deadline)
+
+    if ($status -ne 'SERVICE_RUNNING') {
+        $tail = Get-ErrLogTail
+        throw @"
+Service '$ServiceName' did not reach SERVICE_RUNNING within ${TimeoutSeconds}s.
+Last status: '$status'. Tail of $LogDir\runner.err.log:
+$tail
+"@
     }
 } finally {
     $PSNativeCommandUseErrorActionPreference = $prevNative

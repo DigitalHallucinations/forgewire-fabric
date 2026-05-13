@@ -530,22 +530,32 @@ function runnerProps(r: RunnerInfo, aliases: Record<string, string>): RunnerNode
 export type TaskNode =
   | { kind: "group"; group: "agent" | "command"; count: number }
   | { kind: "task"; task: TaskInfo; parent: "agent" | "command" }
+  | { kind: "historyGroup"; count: number }
+  | { kind: "historyTask"; task: TaskInfo }
   | { kind: "placeholder"; label: string; icon: string; description?: string };
 
 export class TasksProvider implements vscode.TreeDataProvider<TaskNode> {
   private readonly _onDidChange = new vscode.EventEmitter<TaskNode | undefined | void>();
   readonly onDidChangeTreeData = this._onDidChange.event;
 
-  private cache: { agent: TaskInfo[]; command: TaskInfo[] } = { agent: [], command: [] };
+  private cache: { agent: TaskInfo[]; command: TaskInfo[]; history: TaskInfo[] } = {
+    agent: [],
+    command: [],
+    history: [],
+  };
 
-  constructor(private readonly client: () => HubClient | undefined) {}
+  constructor(private readonly client: () => HubClient | undefined, private readonly historyLimit = 100) {}
 
   refresh(): void {
     this._onDidChange.fire();
   }
 
   async getChildren(element?: TaskNode): Promise<TaskNode[]> {
-    if (element?.kind === "task" || element?.kind === "placeholder") {
+    if (
+      element?.kind === "task" ||
+      element?.kind === "historyTask" ||
+      element?.kind === "placeholder"
+    ) {
       return [];
     }
     const c = this.client();
@@ -554,8 +564,9 @@ export class TasksProvider implements vscode.TreeDataProvider<TaskNode> {
     }
     if (!element) {
       try {
-        const tasks = await c.listTasks(50);
-        this.cache = bucketTasks(tasks);
+        // Fetch a wider window so the history bucket has meaningful depth.
+        const tasks = await c.listTasks(Math.max(this.historyLimit * 2, 200));
+        this.cache = bucketTasks(tasks, this.historyLimit);
         if (tasks.length === 0) {
           return [
             {
@@ -566,10 +577,14 @@ export class TasksProvider implements vscode.TreeDataProvider<TaskNode> {
             },
           ];
         }
-        return [
+        const nodes: TaskNode[] = [
           { kind: "group", group: "agent", count: this.cache.agent.length },
           { kind: "group", group: "command", count: this.cache.command.length },
         ];
+        if (this.cache.history.length > 0) {
+          nodes.push({ kind: "historyGroup", count: this.cache.history.length });
+        }
+        return nodes;
       } catch (err) {
         return [
           {
@@ -581,7 +596,20 @@ export class TasksProvider implements vscode.TreeDataProvider<TaskNode> {
         ];
       }
     }
-    // element is a group node — return its tasks.
+    if (element.kind === "historyGroup") {
+      if (this.cache.history.length === 0) {
+        return [
+          {
+            kind: "placeholder",
+            label: "No task history",
+            description: "completed tasks will appear here",
+            icon: "inbox",
+          },
+        ];
+      }
+      return this.cache.history.map((t) => ({ kind: "historyTask" as const, task: t }));
+    }
+    // element is an agent/command group node — return its tasks.
     const bucket = this.cache[element.group];
     if (bucket.length === 0) {
       return [
@@ -614,12 +642,26 @@ export class TasksProvider implements vscode.TreeDataProvider<TaskNode> {
       );
       return item;
     }
+    if (n.kind === "historyGroup") {
+      const item = new vscode.TreeItem("History", vscode.TreeItemCollapsibleState.Collapsed);
+      item.id = "taskgroup:history";
+      item.description = `${n.count} terminal`;
+      item.iconPath = new vscode.ThemeIcon("history");
+      item.contextValue = "taskgroup.history";
+      item.tooltip = new vscode.MarkdownString(
+        "Recently completed tasks (`done`/`failed`/`cancelled`/`timed_out`) with origin tracing."
+      );
+      return item;
+    }
     if (n.kind === "placeholder") {
       const item = new vscode.TreeItem(n.label, vscode.TreeItemCollapsibleState.None);
       item.description = n.description;
       item.iconPath = new vscode.ThemeIcon(n.icon);
       item.contextValue = "task.placeholder";
       return item;
+    }
+    if (n.kind === "historyTask") {
+      return renderHistoryTaskItem(n.task);
     }
     const t = n.task;
     const item = new vscode.TreeItem(`#${t.id}  ${t.title}`, vscode.TreeItemCollapsibleState.None);
@@ -644,10 +686,18 @@ export class TasksProvider implements vscode.TreeDataProvider<TaskNode> {
   }
 }
 
-function bucketTasks(tasks: TaskInfo[]): { agent: TaskInfo[]; command: TaskInfo[] } {
+function bucketTasks(
+  tasks: TaskInfo[],
+  historyLimit: number
+): { agent: TaskInfo[]; command: TaskInfo[]; history: TaskInfo[] } {
   const agent: TaskInfo[] = [];
   const command: TaskInfo[] = [];
+  const history: TaskInfo[] = [];
   for (const t of tasks) {
+    if (TASK_TERMINAL.has((t.status || "").toLowerCase())) {
+      history.push(t);
+      continue;
+    }
     if (t.kind === "command") {
       command.push(t);
     } else {
@@ -656,7 +706,52 @@ function bucketTasks(tasks: TaskInfo[]): { agent: TaskInfo[]; command: TaskInfo[
       agent.push(t);
     }
   }
-  return { agent, command };
+  history.sort(
+    (a, b) =>
+      historyTimestamp(b.completed_at ?? b.created_at) - historyTimestamp(a.completed_at ?? a.created_at)
+  );
+  return { agent, command, history: history.slice(0, historyLimit) };
+}
+
+function renderHistoryTaskItem(t: TaskInfo): vscode.TreeItem {
+  const item = new vscode.TreeItem(`#${t.id}  ${t.title}`, vscode.TreeItemCollapsibleState.None);
+  item.id = `taskHistory:${t.id}`;
+  item.contextValue = `taskHistory.${t.status}`;
+  const ageLabel = historyAgeLabel(t.completed_at ?? t.created_at);
+  const duration = computeRuntime(t);
+  item.description = [
+    t.status,
+    t.kind ?? "agent",
+    t.branch,
+    duration ? `ran ${duration}` : undefined,
+    ageLabel ? `${ageLabel} ago` : undefined,
+  ]
+    .filter(Boolean)
+    .join(" \u00b7 ");
+  item.iconPath = new vscode.ThemeIcon(statusIcon(t.status));
+  const origin = readOriginBlock(t);
+  const errorLine = t.result?.error ? `\n**error:** ${t.result.error}\n` : "";
+  item.tooltip = new vscode.MarkdownString(
+    `**#${t.id} ${t.title}** \`${t.status}\`\n\n` +
+      `- kind: \`${t.kind ?? "agent"}\`\n` +
+      `- branch: \`${t.branch}\`\n` +
+      `- base: \`${t.base_commit?.slice(0, 12)}\`\n` +
+      `- scope: \`${(t.scope_globs ?? []).join(", ") || "(none)"}\`\n` +
+      `- worker: ${t.worker_id ?? "_unassigned_"}\n` +
+      `- created: ${t.created_at ?? "?"}\n` +
+      (t.claimed_at ? `- claimed: ${t.claimed_at}\n` : "") +
+      (t.started_at ? `- started: ${t.started_at}\n` : "") +
+      (t.completed_at ? `- completed: ${t.completed_at}\n` : "") +
+      (duration ? `- runtime: ${duration}\n` : "") +
+      errorLine +
+      (origin ? `\n**origin**\n\n${origin}\n` : "")
+  );
+  item.command = {
+    command: "forgewireFabric.showTask",
+    title: "Show Task",
+    arguments: [t.id],
+  };
+  return item;
 }
 
 function statusIcon(s: string): string {
@@ -1191,6 +1286,8 @@ export class DispatchersProvider implements vscode.TreeDataProvider<DispatcherNo
 
 export type ApprovalNode =
   | { kind: "approval"; approval: ApprovalInfo }
+  | { kind: "historyGroup" }
+  | { kind: "historyApproval"; approval: ApprovalInfo }
   | { kind: "placeholder"; label: string; description?: string; icon: string; command?: vscode.Command; contextValue?: string };
 
 export interface SnoozedApprovalInfo {
@@ -1207,7 +1304,8 @@ export class ApprovalsProvider implements vscode.TreeDataProvider<ApprovalNode> 
   constructor(
     private readonly client: () => HubClient | undefined,
     private readonly getSnoozed: (approvalId: string) => SnoozedApprovalInfo | undefined = () => undefined,
-    private readonly ageBadgeHours: () => number = () => 24
+    private readonly ageBadgeHours: () => number = () => 24,
+    private readonly historyLimit = 100
   ) {}
 
   refresh(): void {
@@ -1215,27 +1313,68 @@ export class ApprovalsProvider implements vscode.TreeDataProvider<ApprovalNode> 
   }
 
   async getChildren(element?: ApprovalNode): Promise<ApprovalNode[]> {
-    if (element) return [];
     const c = this.client();
     if (!c) return [{ kind: "placeholder", label: "Not connected", icon: "debug-disconnect" }];
+    if (element?.kind === "historyGroup") {
+      try {
+        // No server-side multi-status filter -> fetch a wider window and
+        // filter client-side to terminal statuses.
+        const approvals = await c.listApprovals(undefined, Math.max(this.historyLimit * 2, 200));
+        const history = approvals
+          .filter((a) => APPROVAL_TERMINAL.has((a.status || "").toLowerCase()))
+          .sort(
+            (a, b) =>
+              historyTimestamp(b.resolved_at ?? b.created_at) - historyTimestamp(a.resolved_at ?? a.created_at)
+          )
+          .slice(0, this.historyLimit);
+        if (history.length === 0) {
+          return [
+            {
+              kind: "placeholder",
+              label: "No approval history",
+              description: "resolved approvals will appear here",
+              icon: "inbox",
+            },
+          ];
+        }
+        return history.map((a) => ({ kind: "historyApproval" as const, approval: a }));
+      } catch (err) {
+        return [
+          {
+            kind: "placeholder",
+            label: "Hub unreachable",
+            description: err instanceof Error ? err.message : String(err),
+            icon: "warning",
+          },
+        ];
+      }
+    }
+    if (element) return [];
     try {
       const approvals = await c.listApprovals("pending", 100);
       const visible = approvals.filter((a) => !this.getSnoozed(a.approval_id));
       const deferredCount = approvals.length - visible.length;
+      const nodes: ApprovalNode[] = [];
       if (approvals.length === 0) {
-        return [{ kind: "placeholder", label: "No pending approvals", icon: "check", description: "queue is clear" }];
+        nodes.push({ kind: "placeholder", label: "No pending approvals", icon: "check", description: "queue is clear" });
+      } else {
+        for (const a of visible) {
+          nodes.push({ kind: "approval", approval: a });
+        }
+        if (deferredCount > 0) {
+          nodes.push({
+            kind: "placeholder",
+            label: `${deferredCount} deferred approval${deferredCount === 1 ? "" : "s"}`,
+            description: "snoozed locally",
+            icon: "debug-pause",
+            command: { command: "forgewireFabric.showDeferredApprovals", title: "Show Snoozed Approvals" },
+            contextValue: "approval.deferred.placeholder",
+          });
+        }
       }
-      const nodes: ApprovalNode[] = visible.map((a) => ({ kind: "approval" as const, approval: a }));
-      if (deferredCount > 0) {
-        nodes.push({
-          kind: "placeholder",
-          label: `${deferredCount} deferred approval${deferredCount === 1 ? "" : "s"}`,
-          description: "snoozed locally",
-          icon: "debug-pause",
-          command: { command: "forgewireFabric.showDeferredApprovals", title: "Show Snoozed Approvals" },
-          contextValue: "approval.deferred.placeholder",
-        });
-      }
+      // Always offer the History dropdown at the bottom; its expansion
+      // triggers a lazy fetch (resolved-status approvals).
+      nodes.push({ kind: "historyGroup" });
       return nodes;
     } catch (err) {
       return [
@@ -1250,6 +1389,19 @@ export class ApprovalsProvider implements vscode.TreeDataProvider<ApprovalNode> 
   }
 
   getTreeItem(n: ApprovalNode): vscode.TreeItem {
+    if (n.kind === "historyGroup") {
+      const item = new vscode.TreeItem("History", vscode.TreeItemCollapsibleState.Collapsed);
+      item.id = "approvalgroup:history";
+      item.iconPath = new vscode.ThemeIcon("history");
+      item.contextValue = "approval.historyGroup";
+      item.tooltip = new vscode.MarkdownString(
+        "Recently resolved approvals (`approved`/`denied`/`expired`/`consumed`/`revoked`) with origin tracing."
+      );
+      return item;
+    }
+    if (n.kind === "historyApproval") {
+      return renderHistoryApprovalItem(n.approval);
+    }
     if (n.kind === "placeholder") {
       const item = new vscode.TreeItem(n.label, vscode.TreeItemCollapsibleState.None);
       item.description = n.description;
@@ -1293,6 +1445,42 @@ export class ApprovalsProvider implements vscode.TreeDataProvider<ApprovalNode> 
     ).value;
     return item;
   }
+}
+
+function renderHistoryApprovalItem(a: ApprovalInfo): vscode.TreeItem {
+  const label = a.task_label || a.approval_id.slice(0, 12);
+  const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.None);
+  item.id = `approvalHistory:${a.approval_id}`;
+  item.contextValue = `approvalHistory.${a.status}`;
+  const ageLabel = historyAgeLabel(a.resolved_at ?? a.created_at);
+  item.description = [
+    a.status,
+    a.branch,
+    a.approver ? `by ${a.approver}` : undefined,
+    ageLabel ? `${ageLabel} ago` : undefined,
+  ]
+    .filter(Boolean)
+    .join(" \u00b7 ");
+  item.iconPath = new vscode.ThemeIcon(approvalHistoryIcon(a.status));
+  const origin = readOriginBlock(a);
+  item.tooltip = new vscode.MarkdownString(
+    `**${label}** \`${a.status}\`\n\n` +
+      `- approval_id: \`${a.approval_id}\`\n` +
+      `- branch: \`${a.branch ?? "?"}\`\n` +
+      `- scope: \`${approvalScopes(a).join(", ") || "(none)"}\`\n` +
+      (a.envelope_hash ? `- envelope: \`${String(a.envelope_hash).slice(0, 16)}\u2026\`\n` : "") +
+      `- created: ${a.created_at ?? "?"}\n` +
+      (a.resolved_at ? `- resolved: ${a.resolved_at}\n` : "") +
+      (a.approver ? `- approver: ${a.approver}\n` : "") +
+      (a.reason ? `- reason: ${a.reason}\n` : "") +
+      (origin ? `\n**origin**\n\n${origin}\n` : "")
+  );
+  item.command = {
+    command: "forgewireFabric.examineApproval",
+    title: "Examine Approval",
+    arguments: [a],
+  };
+  return item;
 }
 
 function approvalScopes(a: ApprovalInfo): string[] {
@@ -1368,183 +1556,6 @@ const TASK_TERMINAL: ReadonlySet<string> = new Set([
   "cancelled",
   "timed_out",
 ]);
-
-export type ApprovalHistoryNode =
-  | { kind: "approval"; approval: ApprovalInfo }
-  | { kind: "placeholder"; label: string; description?: string; icon: string };
-
-export class ApprovalsHistoryProvider implements vscode.TreeDataProvider<ApprovalHistoryNode> {
-  private readonly _onDidChange = new vscode.EventEmitter<ApprovalHistoryNode | undefined | void>();
-  readonly onDidChangeTreeData = this._onDidChange.event;
-
-  constructor(private readonly client: () => HubClient | undefined, private readonly limit = 100) {}
-
-  refresh(): void {
-    this._onDidChange.fire();
-  }
-
-  async getChildren(element?: ApprovalHistoryNode): Promise<ApprovalHistoryNode[]> {
-    if (element) return [];
-    const c = this.client();
-    if (!c) return [{ kind: "placeholder", label: "Not connected", icon: "debug-disconnect" }];
-    try {
-      // No server-side multi-status filter -> fetch the recent window and
-      // filter client-side to terminal statuses.
-      const approvals = await c.listApprovals(undefined, Math.max(this.limit * 2, 200));
-      const history = approvals
-        .filter((a) => APPROVAL_TERMINAL.has((a.status || "").toLowerCase()))
-        .sort((a, b) => historyTimestamp(b.resolved_at ?? b.created_at) - historyTimestamp(a.resolved_at ?? a.created_at))
-        .slice(0, this.limit);
-      if (history.length === 0) {
-        return [{ kind: "placeholder", label: "No approval history", description: "resolved approvals will appear here", icon: "inbox" }];
-      }
-      return history.map((a) => ({ kind: "approval" as const, approval: a }));
-    } catch (err) {
-      return [
-        {
-          kind: "placeholder",
-          label: "Hub unreachable",
-          description: err instanceof Error ? err.message : String(err),
-          icon: "warning",
-        },
-      ];
-    }
-  }
-
-  getTreeItem(n: ApprovalHistoryNode): vscode.TreeItem {
-    if (n.kind === "placeholder") {
-      const item = new vscode.TreeItem(n.label, vscode.TreeItemCollapsibleState.None);
-      item.description = n.description;
-      item.iconPath = new vscode.ThemeIcon(n.icon);
-      item.contextValue = "approvalHistory.placeholder";
-      return item;
-    }
-    const a = n.approval;
-    const label = a.task_label || a.approval_id.slice(0, 12);
-    const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.None);
-    item.id = `approvalHistory:${a.approval_id}`;
-    item.contextValue = `approvalHistory.${a.status}`;
-    const ageLabel = historyAgeLabel(a.resolved_at ?? a.created_at);
-    item.description = [
-      a.status,
-      a.branch,
-      a.approver ? `by ${a.approver}` : undefined,
-      ageLabel ? `${ageLabel} ago` : undefined,
-    ]
-      .filter(Boolean)
-      .join(" \u00b7 ");
-    item.iconPath = new vscode.ThemeIcon(approvalHistoryIcon(a.status));
-    const origin = readOriginBlock(a);
-    item.tooltip = new vscode.MarkdownString(
-      `**${label}** \`${a.status}\`\n\n` +
-        `- approval_id: \`${a.approval_id}\`\n` +
-        `- branch: \`${a.branch ?? "?"}\`\n` +
-        `- scope: \`${approvalScopes(a).join(", ") || "(none)"}\`\n` +
-        (a.envelope_hash ? `- envelope: \`${String(a.envelope_hash).slice(0, 16)}\u2026\`\n` : "") +
-        `- created: ${a.created_at ?? "?"}\n` +
-        (a.resolved_at ? `- resolved: ${a.resolved_at}\n` : "") +
-        (a.approver ? `- approver: ${a.approver}\n` : "") +
-        (a.reason ? `- reason: ${a.reason}\n` : "") +
-        (origin ? `\n**origin**\n\n${origin}\n` : "")
-    );
-    item.command = {
-      command: "forgewireFabric.examineApproval",
-      title: "Examine Approval",
-      arguments: [a],
-    };
-    return item;
-  }
-}
-
-export type TaskHistoryNode =
-  | { kind: "task"; task: TaskInfo }
-  | { kind: "placeholder"; label: string; description?: string; icon: string };
-
-export class TasksHistoryProvider implements vscode.TreeDataProvider<TaskHistoryNode> {
-  private readonly _onDidChange = new vscode.EventEmitter<TaskHistoryNode | undefined | void>();
-  readonly onDidChangeTreeData = this._onDidChange.event;
-
-  constructor(private readonly client: () => HubClient | undefined, private readonly limit = 100) {}
-
-  refresh(): void {
-    this._onDidChange.fire();
-  }
-
-  async getChildren(element?: TaskHistoryNode): Promise<TaskHistoryNode[]> {
-    if (element) return [];
-    const c = this.client();
-    if (!c) return [{ kind: "placeholder", label: "Not connected", icon: "debug-disconnect" }];
-    try {
-      const tasks = await c.listTasks(Math.max(this.limit * 2, 200));
-      const history = tasks
-        .filter((t) => TASK_TERMINAL.has((t.status || "").toLowerCase()))
-        .sort((a, b) => historyTimestamp(b.completed_at ?? b.created_at) - historyTimestamp(a.completed_at ?? a.created_at))
-        .slice(0, this.limit);
-      if (history.length === 0) {
-        return [{ kind: "placeholder", label: "No task history", description: "completed tasks will appear here", icon: "inbox" }];
-      }
-      return history.map((t) => ({ kind: "task" as const, task: t }));
-    } catch (err) {
-      return [
-        {
-          kind: "placeholder",
-          label: "Hub unreachable",
-          description: err instanceof Error ? err.message : String(err),
-          icon: "warning",
-        },
-      ];
-    }
-  }
-
-  getTreeItem(n: TaskHistoryNode): vscode.TreeItem {
-    if (n.kind === "placeholder") {
-      const item = new vscode.TreeItem(n.label, vscode.TreeItemCollapsibleState.None);
-      item.description = n.description;
-      item.iconPath = new vscode.ThemeIcon(n.icon);
-      item.contextValue = "taskHistory.placeholder";
-      return item;
-    }
-    const t = n.task;
-    const item = new vscode.TreeItem(`#${t.id}  ${t.title}`, vscode.TreeItemCollapsibleState.None);
-    item.id = `taskHistory:${t.id}`;
-    item.contextValue = `taskHistory.${t.status}`;
-    const ageLabel = historyAgeLabel(t.completed_at ?? t.created_at);
-    const duration = computeRuntime(t);
-    item.description = [
-      t.status,
-      t.kind ?? "agent",
-      t.branch,
-      duration ? `ran ${duration}` : undefined,
-      ageLabel ? `${ageLabel} ago` : undefined,
-    ]
-      .filter(Boolean)
-      .join(" \u00b7 ");
-    item.iconPath = new vscode.ThemeIcon(statusIcon(t.status));
-    const origin = readOriginBlock(t);
-    const errorLine = t.result?.error ? `\n**error:** ${t.result.error}\n` : "";
-    item.tooltip = new vscode.MarkdownString(
-      `**#${t.id} ${t.title}** \`${t.status}\`\n\n` +
-        `- kind: \`${t.kind ?? "agent"}\`\n` +
-        `- branch: \`${t.branch}\`\n` +
-        `- base: \`${t.base_commit?.slice(0, 12)}\`\n` +
-        `- scope: \`${(t.scope_globs ?? []).join(", ") || "(none)"}\`\n` +
-        `- worker: ${t.worker_id ?? "_unassigned_"}\n` +
-        `- created: ${t.created_at ?? "?"}\n` +
-        (t.claimed_at ? `- claimed: ${t.claimed_at}\n` : "") +
-        (t.started_at ? `- started: ${t.started_at}\n` : "") +
-        (t.completed_at ? `- completed: ${t.completed_at}\n` : "") +
-        (duration ? `- runtime: ${duration}\n` : "") +
-        errorLine +
-        (origin ? `\n**origin**\n\n${origin}\n` : "")
-    );
-    item.command = {
-      command: "forgewireFabric.showTask",
-      title: "Show Task",
-      arguments: [t.id],
-    };
-    return item;
-  }
-}
 
 function historyTimestamp(ts: string | undefined | null): number {
   if (!ts) return 0;

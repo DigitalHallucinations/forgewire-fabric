@@ -13,13 +13,11 @@ import * as vscode from "vscode";
 import { ApprovalInfo, HubClient } from "./hubClient";
 import {
   ApprovalNode,
-  ApprovalsHistoryProvider,
   ApprovalsProvider,
   AuditProvider,
   HostsProvider,
   HubProvider,
   SecretsProvider,
-  TasksHistoryProvider,
   TasksProvider,
 } from "./treeProviders";
 
@@ -34,8 +32,6 @@ let approvalsProvider: ApprovalsProvider;
 let auditProvider: AuditProvider;
 let secretsProvider: SecretsProvider;
 let tasksProvider: TasksProvider;
-let approvalsHistoryProvider: ApprovalsHistoryProvider;
-let tasksHistoryProvider: TasksHistoryProvider;
 let refreshTimer: NodeJS.Timeout | undefined;
 let context: vscode.ExtensionContext;
 
@@ -72,17 +68,13 @@ export async function activate(ctx: vscode.ExtensionContext): Promise<void> {
   auditProvider = new AuditProvider(getClient);
   secretsProvider = new SecretsProvider(getClient);
   tasksProvider = new TasksProvider(getClient);
-  approvalsHistoryProvider = new ApprovalsHistoryProvider(getClient);
-  tasksHistoryProvider = new TasksHistoryProvider(getClient);
   ctx.subscriptions.push(
     vscode.window.registerTreeDataProvider("forgewireFabric.hub", hubProvider),
     vscode.window.registerTreeDataProvider("forgewireFabric.hosts", hostsProvider),
     vscode.window.registerTreeDataProvider("forgewireFabric.approvals", approvalsProvider),
-    vscode.window.registerTreeDataProvider("forgewireFabric.approvalsHistory", approvalsHistoryProvider),
     vscode.window.registerTreeDataProvider("forgewireFabric.audit", auditProvider),
     vscode.window.registerTreeDataProvider("forgewireFabric.secrets", secretsProvider),
-    vscode.window.registerTreeDataProvider("forgewireFabric.tasks", tasksProvider),
-    vscode.window.registerTreeDataProvider("forgewireFabric.tasksHistory", tasksHistoryProvider)
+    vscode.window.registerTreeDataProvider("forgewireFabric.tasks", tasksProvider)
   );
 
   ctx.subscriptions.push(
@@ -221,8 +213,6 @@ async function probeAndRefresh(): Promise<void> {
   tasksProvider?.refresh();
   hostsProvider?.refresh();
   approvalsProvider?.refresh();
-  approvalsHistoryProvider?.refresh();
-  tasksHistoryProvider?.refresh();
   auditProvider?.refresh();
   secretsProvider?.refresh();
 }
