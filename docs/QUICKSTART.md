@@ -205,7 +205,7 @@ settings reference.
 | `FORGEWIRE_RUNNER_POLL_INTERVAL` | Seconds between empty-claim polls (default 5.0). |
 
 Legacy `BLACKBOARD_*` aliases are still accepted for backwards compatibility
-with PhrenForge integrations.
+with parent-platform integrations that still use legacy naming.
 
 ## Signed dispatch (M2.4)
 
