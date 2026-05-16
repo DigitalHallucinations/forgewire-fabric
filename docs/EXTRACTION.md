@@ -1,32 +1,40 @@
-# Extraction status
+# Extraction and migration notes
 
-This repository was created on 2026-05-03 by extracting the following files from [PhrenForge](https://github.com/DigitalHallucinations/PhrenForge) at commit `195ea6fc`:
+## Historical archive (read-only context)
 
-| Source (PhrenForge) | Destination (forgewire) |
+This repository was created on **2026-05-03** by extracting Fabric-focused components from the parent platform (then PhrenForge, later ForgeWire) at commit `195ea6fc`.
+
+| Source (historical parent repo) | Destination (forgewire-fabric) |
 |---------------------|-------------------------|
-| `forgewire-runtime/Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `rustfmt.toml`, `pyproject.toml`, `PERFORMANCE.md`, `README.md`, `.gitignore` | repo root (renamed `README.md` → `README-runtime.md`) |
+| `forgewire-runtime/Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `rustfmt.toml`, `pyproject.toml`, `PERFORMANCE.md`, `README.md`, `.gitignore` | repo root (with runtime README moved to `README-runtime.md`) |
 | `forgewire-runtime/crates/{fabric-protocol, fabric-claim-router, fabric-streams, fabric-py}/` | `crates/` |
-| `scripts/remote/hub/*.{py,sql}` | `python/forgewire/hub/` |
-| `scripts/remote/runner/*.py` | `python/forgewire/runner/` |
+| `scripts/remote/hub/*.{py,sql}` | `python/forgewire_fabric/hub/` |
+| `scripts/remote/runner/*.py` | `python/forgewire_fabric/runner/` |
 | `scripts/remote/{bench_*,smoke_test}.py`, `scripts/remote/*.ps1` | `scripts/` |
 | `tests/remote/test_forgewire_*.py`, `__init__.py` | `tests/` |
 
-## What is NOT yet renamed
+The historical extraction lineage is retained for auditability and provenance only.
 
-The following carry-overs from the PhrenForge namespace will be normalised in **M2.1** (see [todo 114 Phase 2](https://github.com/DigitalHallucinations/PhrenForge/blob/main/todos/114-forgewire-fabric/phase-2-extraction-and-tooling.md)):
+## Current operator guidance (authoritative)
 
-- Python imports referencing `scripts.remote.hub.*` or `scripts.remote.runner.*` need to point at `forgewire_fabric.hub.*` / `forgewire_fabric.runner.*`.
-- Environment variables (`BLACKBOARD_URL`, `PHRENFORGE_*`) need a `FORGEWIRE_*` rename with a transitional alias period.
-- Class names (`Blackboard`, `BlackboardClient`) need `Hub`, `HubClient`. The `Blackboard` term is kept as a separate concept for PhrenForge's *cognitive* state.
-- `forgewire-runtime` references in inline comments / pyproject metadata need to point at the new repo URL.
-- Service/process names (`PhrenForgeHub` NSSM service) need a `ForgeWireHub` alternative shipped via the M2.3 installers.
+For day-to-day usage and release operations, treat the following as source of truth:
 
-## How to consume the snapshot today
+- Product identity and scope: [`README.md`](../README.md)
+- Positioning and boundary with parent platform: [`docs/POSITIONING.md`](POSITIONING.md)
+- Install and run flows: [`docs/QUICKSTART.md`](QUICKSTART.md)
+- Service supervision/install details: [`docs/operations/service-install.md`](operations/service-install.md)
+- Release cut checklist: [`docs/release-checklist.md`](release-checklist.md)
 
-1. **Use the Rust crates directly.** They are self-contained and ready: `cargo test --workspace` passes.
-2. **Use the FastAPI hub.** Run `python -m uvicorn forgewire_fabric.hub.server:app` after fixing import paths — or run it from a PhrenForge checkout where the imports resolve naturally.
-3. **Wait for M2.1** if you want a clean PyPI-installable `pip install forgewire-fabric` story; that lands in this repo as the next milestone.
+### Migration compatibility notes still relevant
 
-## Contributing
+These are legacy compatibility surfaces still intentionally present in the codebase:
 
-Open an issue or PR. The roadmap and acceptance gates live in PhrenForge's `todos/114-forgewire-fabric/` until extraction is complete; from M2.1 onward they migrate into this repo as the canonical home.
+- Legacy `BLACKBOARD_*` aliases alongside canonical `FORGEWIRE_*` variables for transitional integrations.
+- Some inline lineage comments referencing pre-extraction milestone IDs.
+- Backward-compatibility aliases for earlier client naming where explicitly documented.
+
+These are compatibility shims, not indications that this repository is the full parent platform.
+
+## Contribution note
+
+Open issues/PRs against this repo for Fabric behavior, docs, and releases. Historical roadmap references are acceptable as lineage context, but new release and operator guidance should be documented in this repository.
